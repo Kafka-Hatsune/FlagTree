@@ -304,6 +304,210 @@ def alloc(
         raise RuntimeError(f"Memory allocation failed: {str(e)}") from e
 
 
+def _unwrap_barrier_constexpr(value):
+    value = tl._unwrap_if_constexpr(value)
+    if isinstance(value, tl.constexpr):
+        return value.value
+    return value
+
+
+def _require_barrier_int(value, name: str) -> int:
+    value = _unwrap_barrier_constexpr(value)
+    if not isinstance(value, int):
+        raise ValueError(f"{name} must be a compile-time integer")
+    return value
+
+
+def _normalize_barrier_init(init) -> str:
+    init = _unwrap_barrier_constexpr(init)
+    if isinstance(init, str):
+        normalized = init.lower()
+        if normalized in (tle.PENDING, "pending"):
+            return tle.PENDING
+        if normalized in (tle.READY, "ready"):
+            return tle.READY
+    raise ValueError("barrier init must be tle.gpu.PENDING or tle.gpu.READY")
+
+
+def _reserve_named_barrier_ids(_semantic, count: int) -> int:
+    next_id = getattr(_semantic, "_tle_next_named_barrier_id", 1)
+    last_id = next_id + count - 1
+    if last_id > 15:
+        raise ValueError("TLE named barrier allocation exhausted ids 1..15")
+    setattr(_semantic, "_tle_next_named_barrier_id", last_id + 1)
+    return next_id
+
+
+def _barrier_handle_key(handle):
+    try:
+        hash(handle)
+        return handle
+    except TypeError:
+        return id(handle)
+
+
+def _ensure_named_barrier_ids(slot: tle.barrier, _semantic) -> None:
+    if slot.named_base_id > 0:
+        return
+    key = slot.allocation_key
+    if key is None:
+        key = _barrier_handle_key(slot.handle)
+    named_bases = getattr(_semantic, "_tle_barrier_named_bases", None)
+    if named_bases is None:
+        named_bases = {}
+        setattr(_semantic, "_tle_barrier_named_bases", named_bases)
+    base_id = named_bases.get(key)
+    if base_id is None:
+        base_id = _reserve_named_barrier_ids(_semantic, slot.num_barriers)
+        named_bases[key] = base_id
+    slot.named_base_id = base_id
+    slot.type.named_base_id = base_id
+
+
+def _barrier_phase_tensor(phaseIdx, init: str, _semantic) -> tl.tensor:
+    init_polarity = 1 if init == tle.READY else 0
+    raw_phase = _unwrap_barrier_constexpr(phaseIdx)
+    if isinstance(raw_phase, int):
+        return _semantic.to_tensor((raw_phase & 1) ^ init_polarity).to(tl.int32, _semantic=_semantic)
+
+    phase = _semantic.to_tensor(phaseIdx)
+    if getattr(phase.type, "is_block", lambda: False)():
+        raise ValueError("barrier phaseIdx must be a scalar integer")
+    if not getattr(phase.type, "is_int", lambda: False)():
+        raise ValueError(f"barrier phaseIdx must be integer, got {phase.type}")
+    if phase.dtype != tl.int32:
+        phase = phase.to(tl.int32, _semantic=_semantic)
+    phase = phase.__and__(1, _semantic=_semantic)
+    if init_polarity:
+        phase = phase.__xor__(1, _semantic=_semantic)
+    return phase
+
+
+def _barrier_slot(value: tle.barrier, _semantic) -> tle.barrier:
+    if not isinstance(value, tle.barrier):
+        raise ValueError(f"barrier operation expects tle.gpu barrier, got {type(value).__name__}")
+    if value.is_slot:
+        return value
+    return value.__getitem__(0, _semantic=_semantic)
+
+
+def _record_barrier_backend(slot: tle.barrier, backend: str, _semantic) -> None:
+    if slot.named_base_id > 0 and slot.static_index is not None:
+        key = (slot.named_base_id, slot.static_index)
+    else:
+        key = _barrier_handle_key(slot.handle)
+    uses = getattr(_semantic, "_tle_barrier_backend_uses", None)
+    if uses is None:
+        uses = {}
+        setattr(_semantic, "_tle_barrier_backend_uses", uses)
+    previous = uses.get(key)
+    if previous is not None and previous != backend:
+        raise ValueError("cannot mix named and mbarrier backends for the same barrier slot")
+    uses[key] = backend
+
+
+@tl.builtin
+def alloc_barriers(
+    num_barriers,
+    arrive_count=1,
+    init=tle.PENDING,
+    expect_bytes=None,
+    _semantic=None,
+) -> tle.barrier:
+    """Allocate a TLE GPU barrier array."""
+    num_barriers = _require_barrier_int(num_barriers, "num_barriers")
+    arrive_count = _require_barrier_int(arrive_count, "arrive_count")
+    init = _normalize_barrier_init(init)
+    if num_barriers <= 0:
+        raise ValueError("num_barriers must be positive")
+    if arrive_count <= 0:
+        raise ValueError("arrive_count must be positive")
+
+    expect_bytes = _unwrap_barrier_constexpr(expect_bytes)
+    if expect_bytes is not None:
+        if not isinstance(expect_bytes, int):
+            raise ValueError("expect_bytes must be a compile-time integer or None")
+        if expect_bytes <= 0:
+            raise ValueError("expect_bytes must be positive when provided")
+
+    layout = tle.swizzled_shared_layout.make_default(rank=2)
+    named_base_id = 0
+    barrier_ty = tle.barrier_type(num_barriers, arrive_count, init, expect_bytes, layout, _semantic,
+                                  shape=[num_barriers, 1], named_base_id=named_base_id)
+    handle = _semantic.builder.create_barrier_alloc(
+        barrier_ty.to_ir(_semantic.builder),
+        num_barriers,
+        arrive_count,
+        1 if init == tle.READY else 0,
+        -1 if expect_bytes is None else expect_bytes,
+    )
+    allocation_key = _barrier_handle_key(handle)
+    barrier_ty.allocation_key = allocation_key
+    return tle.barrier(handle, num_barriers, arrive_count, init, expect_bytes, layout, _semantic,
+                       shape=[num_barriers, 1], named_base_id=named_base_id, allocation_key=allocation_key)
+
+
+@tl.builtin
+def alloc_barrier(
+    arrive_count=1,
+    init=tle.PENDING,
+    expect_bytes=None,
+    _semantic=None,
+) -> tle.barrier:
+    """Allocate a single TLE GPU barrier."""
+    return alloc_barriers(1, arrive_count=arrive_count, init=init, expect_bytes=expect_bytes, _semantic=_semantic)
+
+
+@tl.builtin
+def barrier_wait(barr, phaseIdx=None, _semantic=None) -> None:
+    """Wait on a TLE GPU barrier slot."""
+    slot = _barrier_slot(barr, _semantic)
+    if phaseIdx is None:
+        if slot.expect_bytes is not None:
+            raise ValueError("barrier_wait on a barrier with expect_bytes requires phaseIdx")
+        if slot.init == tle.READY:
+            raise ValueError("barrier_wait without phaseIdx selects named barrier, which does not support READY")
+        if slot.static_index is None:
+            raise ValueError("named barrier backend requires a static barrier slot index")
+        _ensure_named_barrier_ids(slot, _semantic)
+        _record_barrier_backend(slot, "named", _semantic)
+        _semantic.builder.create_barrier_wait_named(slot.handle, slot.named_base_id + slot.static_index,
+                                                    slot.arrive_count)
+        return
+
+    phase = _barrier_phase_tensor(phaseIdx, slot.init, _semantic)
+    _record_barrier_backend(slot, "mbarrier", _semantic)
+    _semantic.builder.create_barrier_wait_mbarrier(slot.handle, phase.handle)
+
+
+@tl.builtin
+def barrier_arrive(barr, arrive_count=1, phaseIdx=None, _semantic=None) -> None:
+    """Arrive on a TLE GPU barrier slot."""
+    slot = _barrier_slot(barr, _semantic)
+    arrive_count = _require_barrier_int(arrive_count, "arrive_count")
+    if arrive_count <= 0:
+        raise ValueError("arrive_count must be positive")
+
+    if phaseIdx is None:
+        if slot.expect_bytes is not None:
+            raise ValueError("barrier_arrive on a barrier with expect_bytes requires phaseIdx")
+        if slot.init == tle.READY:
+            raise ValueError("barrier_arrive without phaseIdx selects named barrier, which does not support READY")
+        if arrive_count != 1:
+            raise ValueError("named barrier backend requires barrier_arrive arrive_count = 1")
+        if slot.static_index is None:
+            raise ValueError("named barrier backend requires a static barrier slot index")
+        _ensure_named_barrier_ids(slot, _semantic)
+        _record_barrier_backend(slot, "named", _semantic)
+        _semantic.builder.create_barrier_arrive_named(slot.handle, slot.named_base_id + slot.static_index,
+                                                      slot.arrive_count)
+        return
+
+    phase = _barrier_phase_tensor(phaseIdx, slot.init, _semantic)
+    _record_barrier_backend(slot, "mbarrier", _semantic)
+    _semantic.builder.create_barrier_arrive_mbarrier(slot.handle, arrive_count, phase.handle)
+
+
 class CopyDirection(Enum):
     """Copy direction enum for data transfer operations"""
     GM_TO_LOCAL = "GMTOLOCAL"  # Global memory to local memory
