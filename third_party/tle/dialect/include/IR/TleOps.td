@@ -221,8 +221,7 @@ def Tle_BarrierAllocOp : Tle_Op<"barrier.alloc"> {
   let hasVerifier = 1;
 }
 
-def Tle_BarrierWaitOp
-    : Tle_Op<"barrier.wait", [AttrSizedOperandSegments]> {
+def Tle_BarrierWaitOp : Tle_Op<"barrier.wait"> {
   let summary = "wait on a TLE GPU barrier slot";
   let arguments = (ins
     TTG_MemDescType:$barrier,
@@ -235,8 +234,7 @@ def Tle_BarrierWaitOp
   let hasVerifier = 1;
 }
 
-def Tle_BarrierArriveOp
-    : Tle_Op<"barrier.arrive", [AttrSizedOperandSegments]> {
+def Tle_BarrierArriveOp : Tle_Op<"barrier.arrive"> {
   let summary = "arrive on a TLE GPU barrier slot";
   let arguments = (ins
     TTG_MemDescType:$barrier,
