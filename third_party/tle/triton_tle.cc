@@ -238,10 +238,10 @@ void init_triton_tle_ir(py::module &&m) {
            })
       .def("create_warp_group_dot",
            [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
-              mlir::Value &c, InputPrecision inputPrecision,
+              mlir::Value &c, triton::InputPrecision inputPrecision,
               int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
              return self.create<ttng::WarpGroupDotOp>(
-                 c.getType(), a, b, c, nullptr, inputPrecision,
+                 c.getType(), a, b, c, Value(), inputPrecision,
                  maxNumImpreciseAcc, isAsync);
            })
       .def("create_warp_group_dot_wait",
