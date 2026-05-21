@@ -147,6 +147,51 @@ void init_triton_tle_ir(py::module &&m) {
                  context, blockM, blockN, colStride, CTASplitM, CTASplitN,
                  /*twoCTAs=*/false));
            })
+      .def("make_nv_mma_encoding_attr",
+           [](TritonOpBuilder &self, Value opndA, Value opndAcc,
+              unsigned versionMajor, unsigned versionMinor,
+              unsigned moduleNumWarps) {
+             auto context = self.getBuilder().getContext();
+             auto dtypeA =
+                 cast<ttg::TensorOrMemDesc>(opndA.getType()).getElementType();
+             auto retType = cast<RankedTensorType>(opndAcc.getType());
+             Operation *parentOp =
+                 self.getBuilder().getInsertionBlock()->getParentOp();
+             unsigned numWarps =
+                 ttg::maybeLookupNumWarps(parentOp).value_or(moduleNumWarps);
+             auto instrShape = mmaVersionToInstrShape(
+                 versionMajor, retType.getShape(), dtypeA, numWarps);
+
+             // Match the current Hopper WGMMA lowering convention: partition
+             // the accumulator rows across the warp group.
+             SmallVector<unsigned, 2> warpsPerCTA = {numWarps, 1};
+             SmallVector<unsigned, 2> CTAsPerCGA = {1, 1};
+             SmallVector<unsigned, 2> CTASplitNum = {1, 1};
+             SmallVector<unsigned, 2> CTAOrder = {1, 0};
+             auto CTALayout = ttg::CTAEncodingAttr::fromSplitParams(
+                 context, CTAsPerCGA, CTASplitNum, CTAOrder);
+             return mlir::cast<Attribute>(ttg::NvidiaMmaEncodingAttr::get(
+                 context, versionMajor, versionMinor, warpsPerCTA, CTALayout,
+                 instrShape));
+           })
+      .def("make_dot_operand_encoding_attr",
+           [](TritonOpBuilder &self, Value opnd, unsigned opIdx,
+              Attribute parentEnc) -> Attribute {
+             auto context = self.getBuilder().getContext();
+             auto eltType =
+                 cast<RankedTensorType>(opnd.getType()).getElementType();
+             return ttg::DotOperandEncodingAttr::get(context, opIdx, parentEnc,
+                                                     eltType);
+           })
+      .def("get_block_ty_with_encoding",
+           [](TritonOpBuilder &self, Type &elementType,
+              std::vector<int64_t> &shape, Attribute &encoding) -> Type {
+             return RankedTensorType::get(shape, elementType, encoding);
+           })
+      .def("create_convert_layout",
+           [](TritonOpBuilder &self, Type resultTy, Value value) -> Value {
+             return self.create<ttg::ConvertLayoutOp>(resultTy, value);
+           })
       .def("create_local_alloc",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
               Type &elementType, Attribute &encoding) -> mlir::Value {
@@ -190,6 +235,25 @@ void init_triton_tle_ir(py::module &&m) {
       .def("create_local_store",
            [](TritonOpBuilder &self, Value &dst, Value &regValues) -> void {
              self.create<ttg::LocalStoreOp>(regValues, dst);
+           })
+      .def("create_warp_group_dot",
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, InputPrecision inputPrecision,
+              int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
+             return self.create<ttng::WarpGroupDotOp>(
+                 c.getType(), a, b, c, nullptr, inputPrecision,
+                 maxNumImpreciseAcc, isAsync);
+           })
+      .def("create_warp_group_dot_wait",
+           [](TritonOpBuilder &self, std::vector<Value> inputs,
+              unsigned pendings) -> std::vector<Value> {
+             auto waitOp =
+                 self.create<ttng::WarpGroupDotWaitOp>(inputs, pendings);
+             std::vector<Value> outputs;
+             outputs.reserve(waitOp->getNumResults());
+             for (Value result : waitOp->getResults())
+               outputs.push_back(result);
+             return outputs;
            })
       .def("create_local_pointers",
            [](TritonOpBuilder &self, Type resultTy, Value memDesc,

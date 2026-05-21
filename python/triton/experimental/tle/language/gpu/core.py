@@ -526,6 +526,159 @@ def barrier_arrive(barr, arrive_count=1, phaseIdx=None, _semantic=None) -> None:
     _semantic.builder.create_barrier_arrive_mbarrier(slot.handle, arrive_count, phase.handle)
 
 
+def _require_wgmma_int(value, name: str) -> int:
+    value = tl._unwrap_if_constexpr(value)
+    if isinstance(value, tl.constexpr):
+        value = value.value
+    if not isinstance(value, int):
+        raise ValueError(f"{name} must be a compile-time integer")
+    return value
+
+
+def _require_wgmma_smem_operand(value, name: str) -> tle.buffered_tensor:
+    if not isinstance(value, tle.buffered_tensor):
+        raise ValueError(f"{name} must be a tle.gpu buffered_tensor in shared memory")
+    if value.type.storage is not tle.smem:
+        raise ValueError(f"{name} must live in shared memory")
+    if not isinstance(value.type.layout, tle.nv_mma_shared_layout):
+        raise ValueError(f"{name} must use nv_mma_shared_layout; allocate it with the default tle.gpu.alloc layout")
+    if len(value.type.shape) != 2:
+        raise ValueError(f"{name} must be a rank-2 shared tile")
+    return value
+
+
+def _wgmma_ret_scalar_ty(lhs_dtype, out_dtype):
+    if lhs_dtype.is_int():
+        if lhs_dtype != tl.int8:
+            raise ValueError("wgmma integer operands currently support only tl.int8")
+        return tl.int32
+    if out_dtype.is_bf16():
+        raise ValueError("wgmma out_dtype=bfloat16 is unsupported; use float32/float16 and cast afterward")
+    if lhs_dtype.is_fp32() or lhs_dtype.is_bf16():
+        return tl.float32
+    return out_dtype
+
+
+def _wgmma_zero_value(builder, scalar_ty):
+    if scalar_ty.is_int():
+        return builder.get_int32(0)
+    if scalar_ty.is_fp64():
+        return builder.get_fp64(0)
+    if scalar_ty.is_fp16():
+        return builder.get_fp16(0)
+    return builder.get_fp32(0)
+
+
+@tl.builtin
+def wgmma(
+    a,
+    b,
+    acc=None,
+    input_precision=None,
+    max_num_imprecise_acc=None,
+    out_dtype=tl.float32,
+    _semantic=None,
+) -> tl.tensor:
+    """
+    Issue an asynchronous Hopper WGMMA using shared-memory TLE buffers.
+
+    The returned accumulator is an async WGMMA dependency value. Use
+    ``tle.gpu.wgmma_wait(pendings, acc)`` before consuming it with ordinary
+    tensor operations or storing it.
+    """
+    a = _require_wgmma_smem_operand(a, "wgmma a")
+    b = _require_wgmma_smem_operand(b, "wgmma b")
+
+    m, k = [int(tl._unwrap_if_constexpr(dim)) for dim in a.type.shape]
+    k_b, n = [int(tl._unwrap_if_constexpr(dim)) for dim in b.type.shape]
+    if k != k_b:
+        raise ValueError(f"wgmma shape mismatch: a is {a.type.shape}, b is {b.type.shape}")
+    if m < 64 or m % 64 != 0:
+        raise ValueError("wgmma result M dimension must be divisible by 64")
+    if n < 8 or n % 8 != 0:
+        raise ValueError("wgmma result N dimension must be divisible by 8")
+    if k < 16:
+        raise ValueError("wgmma K dimension must be at least 16")
+
+    if not (a.dtype.is_fp8() and b.dtype.is_fp8()):
+        if a.dtype != b.dtype:
+            raise ValueError(f"wgmma operands must have the same dtype, got {a.dtype} and {b.dtype}")
+        if a.dtype not in (tl.int8, tl.float16, tl.bfloat16, tl.float32):
+            raise ValueError(f"unsupported wgmma operand dtype {a.dtype}")
+
+    out_dtype = tl._unwrap_if_constexpr(out_dtype)
+    if not isinstance(out_dtype, tl.dtype):
+        raise ValueError(f"wgmma out_dtype must be a Triton dtype, got {type(out_dtype).__name__}")
+
+    if input_precision is None:
+        input_precision = _semantic.builder.options.default_dot_input_precision
+    input_precision = _semantic._str_to_dot_input_precision(tl._unwrap_if_constexpr(input_precision))
+
+    max_num_imprecise_acc = tl._unwrap_if_constexpr(max_num_imprecise_acc)
+    if isinstance(max_num_imprecise_acc, tl.constexpr):
+        max_num_imprecise_acc = max_num_imprecise_acc.value
+    if max_num_imprecise_acc is None:
+        if a.dtype.is_fp8() and b.dtype.is_fp8():
+            max_num_imprecise_acc = _semantic.builder.options.max_num_imprecise_acc_default
+        else:
+            max_num_imprecise_acc = 0
+    else:
+        max_num_imprecise_acc = _require_wgmma_int(max_num_imprecise_acc, "max_num_imprecise_acc")
+        if max_num_imprecise_acc < 0:
+            raise ValueError("max_num_imprecise_acc must be non-negative")
+
+    ret_scalar_ty = _wgmma_ret_scalar_ty(a.dtype, out_dtype)
+    ret_ty = tl.block_type(ret_scalar_ty, [m, n])
+    builder = _semantic.builder
+
+    acc = tl._unwrap_if_constexpr(acc)
+    if acc is None:
+        zero = _wgmma_zero_value(builder, ret_scalar_ty)
+        acc_handle = builder.create_splat(ret_ty.to_ir(builder), zero)
+    else:
+        if not isinstance(acc, tl.tensor):
+            raise ValueError(f"wgmma acc must be a tl.tensor or None, got {type(acc).__name__}")
+        if tuple(int(tl._unwrap_if_constexpr(dim)) for dim in acc.type.shape) != (m, n):
+            raise ValueError(f"wgmma acc shape must be {(m, n)}, got {acc.type.shape}")
+        if acc.dtype != ret_scalar_ty:
+            raise ValueError(f"wgmma acc dtype must be {ret_scalar_ty}, got {acc.dtype}")
+        acc_handle = acc.handle
+
+    num_warps = getattr(builder.options, "num_warps", 4)
+    mma_layout = builder.make_nv_mma_encoding_attr(a.handle, acc_handle, 3, 0, num_warps)
+    acc_mma_ty = builder.get_block_ty_with_encoding(ret_scalar_ty.to_ir(builder), [m, n], mma_layout)
+    acc_mma = builder.create_convert_layout(acc_mma_ty, acc_handle)
+
+    result = builder.create_warp_group_dot(
+        a.handle,
+        b.handle,
+        acc_mma,
+        input_precision,
+        max_num_imprecise_acc,
+        True,
+    )
+    return tensor(result, ret_ty)
+
+
+@tl.builtin
+def wgmma_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
+    """Wait until ``pendings`` or fewer async WGMMA groups remain outstanding."""
+    if acc is None and isinstance(pendings, tl.tensor):
+        acc = pendings
+        pendings = 0
+    pendings = _require_wgmma_int(pendings, "pendings")
+    if pendings < 0:
+        raise ValueError("wgmma_wait pendings must be non-negative")
+    if not isinstance(acc, tl.tensor):
+        raise ValueError(f"wgmma_wait acc must be a tl.tensor, got {type(acc).__name__}")
+    return tensor(_semantic.builder.create_warp_group_dot_wait([acc.handle], pendings)[0], acc.type)
+
+
+# Names used by the TLX API design notes.
+async_dot = wgmma
+async_dot_wait = wgmma_wait
+
+
 class CopyDirection(Enum):
     """Copy direction enum for data transfer operations"""
     GM_TO_LOCAL = "GMTOLOCAL"  # Global memory to local memory
