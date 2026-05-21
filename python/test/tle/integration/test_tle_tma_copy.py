@@ -98,6 +98,7 @@ def elementwise_tma_add_explicit_barrier_kernel(
     ynumel,
     XBLOCK: tl.constexpr,
     YBLOCK: tl.constexpr,
+    TILE_BYTES: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -113,9 +114,8 @@ def elementwise_tma_add_explicit_barrier_kernel(
     b_smem_ptrs = tle.gpu.local_ptr(b_smem, (row_ids, col_ids))
     c_smem_ptrs = tle.gpu.local_ptr(c_smem, (row_ids, col_ids))
 
-    tile_bytes = XBLOCK * YBLOCK * 4
-    a_bar = tle.gpu.alloc_barrier(expect_bytes=tile_bytes)
-    b_bar = tle.gpu.alloc_barrier(expect_bytes=tile_bytes)
+    a_bar = tle.gpu.alloc_barrier(expect_bytes=TILE_BYTES)
+    b_bar = tle.gpu.alloc_barrier(expect_bytes=TILE_BYTES)
 
     for yoff in range(0, ynumel, YBLOCK):
         phase = (yoff // YBLOCK) & 1
@@ -134,7 +134,8 @@ def elementwise_tma_add_explicit_barrier_kernel(
 def elementwise_add_explicit_barrier(A, B, C, XBLOCK=32, YBLOCK=64):
     xnumel, ynumel = 512, 512
     grid = (triton.cdiv(xnumel, XBLOCK), )
-    return elementwise_tma_add_explicit_barrier_kernel[grid](A, B, C, xnumel, ynumel, XBLOCK, YBLOCK)
+    return elementwise_tma_add_explicit_barrier_kernel[grid](A, B, C, xnumel, ynumel, XBLOCK, YBLOCK,
+                                                             XBLOCK * YBLOCK * 4)
 
 
 class TestTLETmaCopy:

@@ -158,6 +158,7 @@ class TestBufferedTensor:
         def __init__(self, handle, ty):
             self.handle = handle
             self.type = ty
+            self.dtype = ty
 
     class _FakeBlockType:
 
@@ -338,7 +339,7 @@ class TestTmaCopyBarrierFrontend:
             expect_bytes,
             layout,
             semantic,
-            shape=list(shape if shape is not None else [1]),
+            shape=list(shape if shape is not None else [num_barriers, 1]),
             allocation_key="bar",
         )
 

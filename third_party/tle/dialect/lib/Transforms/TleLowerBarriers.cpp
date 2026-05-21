@@ -22,9 +22,10 @@ static int64_t getI32Attr(Operation *op, StringRef name) {
 }
 
 static ttg::MemDescType getBarrierSlotType(ttg::MemDescType arrayTy) {
+  auto context = arrayTy.getContext();
+  auto ctaLayout = ttg::CTAEncodingAttr::getDefault(context, 1);
   Attribute slotEncoding =
-      ttg::SliceEncodingAttr::get(arrayTy.getContext(), 0,
-                                  arrayTy.getEncoding());
+      ttg::SwizzledSharedEncodingAttr::get(context, 1, 1, 1, {0}, ctaLayout);
   return ttg::MemDescType::get({1}, arrayTy.getElementType(), slotEncoding,
                                arrayTy.getMemorySpace(),
                                arrayTy.getMutableMemory());
