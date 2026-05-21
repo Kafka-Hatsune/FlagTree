@@ -181,6 +181,9 @@ class TestBufferedTensor:
         def get_half_ty(self):
             return "fp16"
 
+        def get_int64_ty(self):
+            return "i64"
+
         def make_swizzled_shared_encoding_attr(self, vector_size, per_phase, max_phase, order, ctas_per_cga,
                                                cta_split_num, cta_order):
             self.swizzled_encoding_args = (
