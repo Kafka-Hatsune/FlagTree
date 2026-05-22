@@ -163,7 +163,70 @@ def ws_tma_single_tile_gemm_kernel(
     )
 
 
-def ws_tma_single_tile_gemm(A, B, C, launch_num_warps):
+@triton.jit
+def ws_tma_single_tile_gemm_kernel_async_tasks(
+    a_desc,
+    b_desc,
+    c_ptr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    A_TILE_BYTES: tl.constexpr,
+    B_TILE_BYTES: tl.constexpr,
+):
+    a_smem = tle.gpu.alloc(
+        [BLOCK_M, BLOCK_K],
+        dtype=tl.float16,
+        layout=None,
+        scope=tle.gpu.smem,
+    )
+    b_smem = tle.gpu.alloc(
+        [BLOCK_K, BLOCK_N],
+        dtype=tl.float16,
+        layout=None,
+        scope=tle.gpu.smem,
+    )
+
+    a_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
+    b_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
+    a_full = tle.gpu.alloc_barrier(expect_bytes=A_TILE_BYTES)
+    b_full = tle.gpu.alloc_barrier(expect_bytes=B_TILE_BYTES)
+
+    with tle.gpu.async_tasks():
+        with tle.gpu.async_task("producer"):
+            phase: tl.constexpr = 0
+
+            tle.gpu.barrier_wait(a_empty, phaseIdx=phase)
+            tle.gpu.barrier_wait(b_empty, phaseIdx=phase)
+
+            tle.gpu.copy(a_desc, a_smem, [BLOCK_M, BLOCK_K], [0, 0], barrier=a_full)
+            tle.gpu.copy(b_desc, b_smem, [BLOCK_K, BLOCK_N], [0, 0], barrier=b_full)
+
+            tle.gpu.barrier_wait(a_empty, phaseIdx=1)
+            tle.gpu.barrier_wait(b_empty, phaseIdx=1)
+
+        with tle.gpu.async_task(num_warps=4, registers=168, name="consumer0"):
+            phase: tl.constexpr = 0
+
+            tle.gpu.barrier_wait(a_full, phaseIdx=phase)
+            tle.gpu.barrier_wait(b_full, phaseIdx=phase)
+
+            offs_m = tl.arange(0, BLOCK_M)
+            offs_n = tl.arange(0, BLOCK_N)
+
+            acc = tle.gpu.wgmma(a_smem, b_smem, out_dtype=tl.float32)
+            acc = tle.gpu.wgmma_wait(0, acc)
+
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+            tl.store(c_ptrs, acc)
+
+            tle.gpu.barrier_arrive(a_empty, phaseIdx=phase)
+            tle.gpu.barrier_arrive(b_empty, phaseIdx=phase)
+
+
+def ws_tma_single_tile_gemm(A, B, C, launch_num_warps, use_async_tasks=False):
     assert A.ndim == 2 and B.ndim == 2 and C.ndim == 2
     assert A.shape[1] == B.shape[0]
     assert C.shape == (A.shape[0], B.shape[1])
@@ -177,7 +240,8 @@ def ws_tma_single_tile_gemm(A, B, C, launch_num_warps):
 
     a_desc = TensorDescriptor.from_tensor(A, block_shape=[block_m, block_k])
     b_desc = TensorDescriptor.from_tensor(B, block_shape=[block_k, block_n])
-    ws_tma_single_tile_gemm_kernel[(1, )](
+    kernel_fn = ws_tma_single_tile_gemm_kernel_async_tasks if use_async_tasks else ws_tma_single_tile_gemm_kernel
+    return kernel_fn[(1, )](
         a_desc,
         b_desc,
         C,
@@ -194,19 +258,18 @@ def ws_tma_single_tile_gemm(A, B, C, launch_num_warps):
 
 class TestTLEWarpSpecializedTmaGemm:
 
-    def test_single_tile_producer_consumer_wgmma(self):
-        torch.manual_seed(2026)
-        # The warp-specialized kernel uses a 4-warp producer group plus the
-        # explicit 4-warp consumer partition. Launching with only 4 warps leaves
-        # no consumer to release the empty barriers and deadlocks by design.
-        launch_num_warps = 8
+    @pytest.mark.parametrize("use_async_tasks", [False, True])
+    @pytest.mark.parametrize("launch_num_warps", [4, 8])
+    def test_single_tile_producer_consumer_wgmma(self, use_async_tasks, launch_num_warps):
+        torch.manual_seed(2026 + launch_num_warps + int(use_async_tasks))
         block_m, block_n, block_k = 64, 16, 16
 
         a = torch.randn(block_m, block_k, device="cuda", dtype=torch.float16).contiguous()
         b = torch.randn(block_k, block_n, device="cuda", dtype=torch.float16).contiguous()
         c = torch.empty((block_m, block_n), device="cuda", dtype=torch.float32).contiguous()
 
-        ws_tma_single_tile_gemm(a, b, c, launch_num_warps)
+        kernel = ws_tma_single_tile_gemm(a, b, c, launch_num_warps, use_async_tasks=use_async_tasks)
+        assert "tt.call" not in kernel.asm["ttgir"]
 
         expected = torch.matmul(a.float(), b.float())
         torch.testing.assert_close(c, expected, atol=2e-2, rtol=2e-2)

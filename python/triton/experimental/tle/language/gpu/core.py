@@ -1,5 +1,6 @@
 # flagtree tle
 import builtins
+import threading
 import triton.language.core as tl
 from typing import Optional, Sequence
 from enum import Enum
@@ -14,6 +15,82 @@ from triton.language.core import (
 
 # Address space 3 matches the shared-memory space used in TritonGPU lowering.
 SHARED_MEMORY_ADDRESS_SPACE = 3
+
+
+_async_task_state = threading.local()
+
+
+def _get_async_task_replica_id_stack():
+    if not hasattr(_async_task_state, "replica_id_stack"):
+        _async_task_state.replica_id_stack = []
+    return _async_task_state.replica_id_stack
+
+
+class async_task:
+    """
+    Producer/consumer task marker for ``async_tasks``.
+
+    ``async_task("producer")`` maps to the ``ttg.warp_specialize`` default
+    region. Unmarked tasks, or ``async_task("consumer")``, map to consumer
+    partition regions.
+    """
+
+    def __init__(self, *args, _builder=None, _semantic=None, **kwargs):
+        self.builder = _builder
+        role = "consumer"
+        if args:
+            if len(args) != 1:
+                raise ValueError("async_task accepts at most one positional role")
+            role = tl._unwrap_if_constexpr(args[0])
+            if role == "default":
+                # Compatibility with TLX-style spelling; TLE documents this as
+                # producer because the default region drives data movement.
+                role = "producer"
+        if role not in ("producer", "consumer"):
+            raise ValueError("async_task role must be 'producer' or 'consumer'")
+
+        self.role = role
+        self.is_producer = role == "producer"
+        self.is_consumer = role == "consumer"
+        self.name = tl._unwrap_if_constexpr(kwargs.get("name", role))
+        self.num_warps = tl._unwrap_if_constexpr(kwargs.get("num_warps", None))
+        self.num_regs = tl._unwrap_if_constexpr(kwargs.get("num_regs", kwargs.get("registers", None)))
+        self.replicate = tl._unwrap_if_constexpr(kwargs.get("replicate", 1))
+        self.warp_group_start_id = tl._unwrap_if_constexpr(kwargs.get("warp_group_start_id", None))
+
+        if self.replicate is None or self.replicate < 1:
+            raise ValueError("async_task replicate must be a positive integer")
+        if self.is_producer and self.num_warps is not None:
+            raise ValueError("producer async_task uses the launch num_warps and must not specify num_warps")
+        if self.is_consumer and self.num_warps is None:
+            raise ValueError("consumer async_task requires num_warps")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+
+class async_tasks:
+    """Container for producer/consumer async tasks."""
+
+    def __init__(self, _builder=None, _semantic=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+
+@tl.builtin
+def async_task_replica_id(_semantic=None):
+    stack = _get_async_task_replica_id_stack()
+    if not stack:
+        raise ValueError("async_task_replica_id must be called inside an async_task region")
+    return tl.constexpr(stack[-1])
 
 
 class pipeline(range):
@@ -128,9 +205,10 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     default_args = _as_call_args(default_args)
     default_block = builder.new_block()
     builder.set_insertion_point_to_start(default_block)
-    default_results = _generator.call_JitFunction(default_fn, default_args, kwargs={})
+    default_results = _generator.inline_JitFunction(default_fn, default_args, kwargs={})
     default_result_values = _as_result_values(default_results)
     default_result_handles = flatten_values_to_ir(default_result_values)
+    builder.set_insertion_point_to_end(default_block)
     builder.create_warp_yield(default_result_handles)
     result_types = [result.get_type() for result in default_result_handles]
 
@@ -154,7 +232,8 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
         block_args = [block.get_argument(remapped[j]) for j in builtins.range(len(flattened))]
         block_values = tuple(unflatten_ir_values(block_args, [arg.type for arg in worker_args]))
         caller_context = WarpSpecializeCallerContext(worker_num_warps[idx])
-        _generator.call_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
+        _generator.inline_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
+        builder.set_insertion_point_to_end(block)
         builder.create_warp_return()
 
     builder.set_insertion_point_after(ws_op.get_operation())

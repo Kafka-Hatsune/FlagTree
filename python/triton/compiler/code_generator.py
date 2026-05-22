@@ -396,6 +396,7 @@ class CodeGenerator(ast.NodeVisitor):
         self.local_defs: Dict[str, tensor] = {}
         self.dereference_name: Callable[[str], Any] = self._define_name_lookup()
         self.fn = None
+        self.used_vars = set()
         # Are we currently visiting an ast.arg's default value?  These have some
         # special handling.
         self.visiting_arg_default_value = False
@@ -807,6 +808,7 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Name(self, node):
         if type(node.ctx) is ast.Store:
             return node.id
+        self.used_vars.add(node.id)
         return self.dereference_name(node.id)
 
     def visit_Store(self, node):
@@ -1073,7 +1075,221 @@ class CodeGenerator(ast.NodeVisitor):
             else:
                 return self.visit(node.orelse)
 
+    def _get_tle_gpu_core(self):
+        try:
+            from triton.experimental.tle.language.gpu import core as tle_gpu_core
+        except Exception:
+            return None
+        return tle_gpu_core
+
+    def _get_with_context_function(self, node):
+        if not isinstance(node, ast.With) or len(node.items) != 1:
+            return None
+        context = node.items[0].context_expr
+        if not isinstance(context, ast.Call):
+            return None
+        return self.visit(context.func)
+
+    def _is_tle_async_tasks_with(self, node):
+        tle_gpu_core = self._get_tle_gpu_core()
+        if tle_gpu_core is None:
+            return False
+        return self._get_with_context_function(node) is tle_gpu_core.async_tasks
+
+    def _is_tle_async_task_with(self, node):
+        tle_gpu_core = self._get_tle_gpu_core()
+        if tle_gpu_core is None:
+            return False
+        return self._get_with_context_function(node) is tle_gpu_core.async_task
+
+    def _get_tle_async_task(self, node):
+        tle_gpu_core = self._get_tle_gpu_core()
+        if tle_gpu_core is None or not self._is_tle_async_task_with(node):
+            return None
+        context = node.items[0].context_expr
+        args = [self.visit(arg) for arg in context.args]
+        kwargs = {}
+        for keyword in context.keywords:
+            if keyword.arg is None:
+                raise self._unsupported(node, "async_task does not support **kwargs")
+            kwargs[keyword.arg] = self.visit(keyword.value)
+        return tle_gpu_core.async_task(*args, _semantic=self.semantic, **kwargs)
+
+    def _resolve_tle_async_task_stmts(self, stmts):
+        stmts = stmts if _is_list_like(stmts) else [stmts]
+        resolved = []
+        for stmt in stmts:
+            if self._is_tle_async_task_with(stmt):
+                resolved.append(stmt)
+                continue
+            if isinstance(stmt, ast.If):
+                cond = _unwrap_if_constexpr(self.visit(stmt.test))
+                if type(cond) not in _condition_types:
+                    raise self._unsupported(stmt, "async_tasks if-guards must be tl.constexpr/bool conditions")
+                active_block = stmt.body if cond else stmt.orelse
+                for inner_stmt in active_block:
+                    if not self._is_tle_async_task_with(inner_stmt):
+                        raise self._unsupported(
+                            inner_stmt,
+                            "async_tasks constexpr branches may only contain async_task blocks",
+                        )
+                    resolved.append(inner_stmt)
+                continue
+            raise self._unsupported(stmt, "async_tasks may only contain async_task blocks or constexpr if-guards")
+        return resolved
+
+    def _visit_tle_async_task_body(self, stmt):
+        if ContainsReturnChecker(self.gscope).visit(stmt):
+            raise self._unsupported(stmt, "Cannot have `return` statements inside async_task regions")
+        self.visit_compound_statement(stmt.body)
+
+    def _visit_tle_async_task_body_with_scope(self, stmt, liveins):
+        prev_lscope = self.lscope
+        prev_defs = self.local_defs
+        try:
+            self.lscope = _clone_scope(liveins)
+            self.local_defs = {}
+            self._visit_tle_async_task_body(stmt)
+        finally:
+            self.lscope = prev_lscope
+            self.local_defs = prev_defs
+
+    def _is_tle_capture_value(self, value):
+        if _is_constexpr(value):
+            return False
+        return hasattr(value, "_flatten_ir") or getattr(value, "__triton_aggregate__", False)
+
+    def _flatten_tle_capture_handles(self, value):
+        handles = []
+        if getattr(value, "__triton_aggregate__", False):
+            for field in value.type.fields:
+                field_value = getattr(value, field[0])
+                if hasattr(field_value, "_flatten_ir"):
+                    field_value._flatten_ir(handles)
+        elif hasattr(value, "_flatten_ir"):
+            value._flatten_ir(handles)
+        else:
+            raise TypeError(f"Unsupported async_task capture value {type(value).__name__}")
+        return handles
+
+    def _visit_tle_async_tasks(self, node):
+        tle_gpu_core = self._get_tle_gpu_core()
+        assert tle_gpu_core is not None
+
+        liveins = _clone_scope(self.lscope)
+        prev_defs = _clone_scope(self.local_defs)
+        ip, last_loc = self._get_insertion_point_and_loc()
+        try:
+            self.local_defs = {}
+            stmts = self._resolve_tle_async_task_stmts(node.body)
+            tasks = [self._get_tle_async_task(stmt) for stmt in stmts]
+            producer_indices = [i for i, task in enumerate(tasks) if task.is_producer]
+            if len(producer_indices) != 1:
+                raise self._unsupported(node, "async_tasks requires exactly one producer async_task")
+            producer_index = producer_indices[0]
+
+            consumer_entries = []
+            consumer_regs = []
+            consumer_start_ids = []
+            any_regs = False
+            any_start_ids = False
+            for stmt, task in zip(stmts, tasks):
+                if task.is_producer:
+                    continue
+                any_regs = any_regs or task.num_regs is not None
+                any_start_ids = any_start_ids or task.warp_group_start_id is not None
+                for replica_id in range(task.replicate):
+                    consumer_entries.append((stmt, task, replica_id))
+                    consumer_regs.append(task.num_regs)
+                    if task.warp_group_start_id is None:
+                        consumer_start_ids.append(None)
+                    else:
+                        consumer_start_ids.append(task.warp_group_start_id + replica_id * task.num_warps)
+
+            if not consumer_entries:
+                self._set_insertion_point_and_loc(ip, last_loc)
+                stack = tle_gpu_core._get_async_task_replica_id_stack()
+                stack.append(0)
+                try:
+                    self._visit_tle_async_task_body_with_scope(stmts[producer_index], liveins)
+                finally:
+                    stack.pop()
+                return
+
+            if any_regs and any(reg is None for reg in consumer_regs):
+                raise self._unsupported(node, "consumer async_task registers must be set for all consumers or none")
+            if any_start_ids and any(start_id is None for start_id in consumer_start_ids):
+                raise self._unsupported(
+                    node, "consumer async_task warp_group_start_id must be set for all consumers or none")
+
+            used_before = set(self.used_vars)
+            dry_block = self.builder.create_block()
+            self.builder.set_insertion_point_to_start(dry_block)
+            stack = tle_gpu_core._get_async_task_replica_id_stack()
+            stack.append(-1)
+            try:
+                for stmt in stmts:
+                    self._visit_tle_async_task_body_with_scope(stmt, liveins)
+            finally:
+                stack.pop()
+            dry_block.erase()
+            used_in_tasks = self.used_vars - used_before
+
+            capture_names = [
+                name for name in sorted(liveins.keys() & used_in_tasks) if self._is_tle_capture_value(liveins[name])
+            ]
+            capture_handles = []
+            for name in capture_names:
+                capture_handles.extend(self._flatten_tle_capture_handles(liveins[name]))
+
+            partition_num_warps = [task.num_warps for _, task, _ in consumer_entries]
+            self._set_insertion_point_and_loc(ip, last_loc)
+            ws_op = self.builder.create_warp_specialize([], capture_handles, partition_num_warps)
+            if any_regs:
+                ws_op.set_requested_registers(consumer_regs)
+            if any_start_ids:
+                if not hasattr(ws_op, "set_warp_group_start_ids"):
+                    raise self._unsupported(node, "this build does not expose warp_group_start_id support")
+                ws_op.set_warp_group_start_ids(consumer_start_ids)
+
+            default_block = self.builder.create_block_with_parent(ws_op.get_default_region(), [])
+            self.builder.create_block_with_parent(ws_op.get_partition_op_holder(), [])
+            partitions_op = self.builder.create_warp_specialize_partitions(len(consumer_entries))
+
+            self.builder.set_insertion_point_to_start(default_block)
+            stack.append(0)
+            try:
+                self._visit_tle_async_task_body_with_scope(stmts[producer_index], liveins)
+            finally:
+                stack.pop()
+            self.builder.set_insertion_point_to_end(default_block)
+            self.builder.create_warp_yield([])
+
+            capture_arg_types = [handle.get_type() for handle in capture_handles]
+            for idx, (stmt, _task, replica_id) in enumerate(consumer_entries):
+                region = partitions_op.get_region(idx)
+                block = self.builder.create_block_with_parent(region, capture_arg_types)
+                self.builder.set_insertion_point_to_start(block)
+                stack.append(replica_id)
+                try:
+                    self._visit_tle_async_task_body_with_scope(stmt, liveins)
+                finally:
+                    stack.pop()
+                for arg_idx, handle in enumerate(capture_handles):
+                    block.replace_use_in_block_with(handle, block.get_argument(arg_idx))
+                self.builder.set_insertion_point_to_end(block)
+                self.builder.create_warp_return()
+
+            self.builder.set_insertion_point_after(ws_op.get_operation())
+        finally:
+            self.lscope = liveins
+            self.local_defs = prev_defs
+
     def visit_With(self, node):
+        if self._is_tle_async_tasks_with(node):
+            return self._visit_tle_async_tasks(node)
+        if self._is_tle_async_task_with(node):
+            raise self._unsupported(node, "async_task must be nested inside async_tasks")
         # Lower `with` statements by constructing context managers and calling their enter/exit hooks
         # Instantiate each context manager with builder injection
         cm_list = []
@@ -1431,6 +1647,70 @@ class CodeGenerator(ast.NodeVisitor):
             return None
         handles = [call_op.get_result(i) for i in range(call_op.get_num_results())]
         return next(unflatten_ir_values(handles, [callee_ret_type]))
+
+    def inline_JitFunction(self, fn: JITFunction, args, kwargs, caller_context=None):
+        """Inline a JITFunction body into the current insertion block.
+
+        This is intentionally narrower than a general inliner: it is used by
+        TLE warp-specialize regions so partition-local lowering can see the
+        body directly instead of a helper ``tt.call`` boundary.
+        """
+        bound_args = inspect.getcallargs(fn.fn, *args, **kwargs)
+        ordered_args = [bound_args[name] for name in fn.arg_names]
+        for i, arg in enumerate(ordered_args):
+            if isinstance(arg, (language.dtype, float, int, bool, JITFunction)):
+                ordered_args[i] = language.core.constexpr(arg)
+
+        parsed = fn.parse()
+        if isinstance(parsed, ast.Module):
+            if len(parsed.body) != 1 or not isinstance(parsed.body[0], ast.FunctionDef):
+                raise ValueError("inline_JitFunction expects a single function definition")
+            fn_def = parsed.body[0]
+        else:
+            fn_def = parsed
+        if not isinstance(fn_def, ast.FunctionDef):
+            raise ValueError("inline_JitFunction expects a function definition")
+
+        mapped_gscope = {}
+        for k, v in fn.get_capture_scope().items():
+            if isinstance(v, ModuleType):
+                mapped_gscope[k] = self.builder.module_map.get(v.__name__, v)
+                continue
+            module_name = getattr(v, "__module__", "")
+            if module_name in self.builder.module_map:
+                mapped_gscope[k] = getattr(self.builder.module_map[module_name], v.__name__)
+            else:
+                mapped_gscope[k] = v
+
+        prev_gscope = self.gscope
+        prev_lscope = self.lscope
+        prev_defs = self.local_defs
+        prev_caller_context = self.caller_context
+        try:
+            self.gscope = mapped_gscope
+            self.lscope = {}
+            self.local_defs = {}
+            self.caller_context = caller_context or self.caller_context
+            for arg_name, arg_value in zip(fn.arg_names, ordered_args):
+                self.set_value(arg_name, arg_value)
+
+            def decay_return(value):
+                if isinstance(value, language.tuple):
+                    return _apply_to_tuple_values(value, decay_return)
+                if isinstance(value, (language.constexpr, int, float)):
+                    return self.semantic.to_tensor(value)
+                return value
+
+            for stmt in fn_def.body:
+                if isinstance(stmt, ast.Return):
+                    return decay_return(self.visit(stmt.value)) if stmt.value is not None else None
+                self.visit(stmt)
+            return None
+        finally:
+            self.gscope = prev_gscope
+            self.lscope = prev_lscope
+            self.local_defs = prev_defs
+            self.caller_context = prev_caller_context
 
     def call_Function(self, node, fn, args, kws):
         # 4. Get current line number and hints
