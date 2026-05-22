@@ -194,9 +194,12 @@ def ws_tma_single_tile_gemm(A, B, C, launch_num_warps):
 
 class TestTLEWarpSpecializedTmaGemm:
 
-    @pytest.mark.parametrize("launch_num_warps", [4, 8])
-    def test_single_tile_producer_consumer_wgmma(self, launch_num_warps):
-        torch.manual_seed(2026 + launch_num_warps)
+    def test_single_tile_producer_consumer_wgmma(self):
+        torch.manual_seed(2026)
+        # The warp-specialized kernel uses a 4-warp producer group plus the
+        # explicit 4-warp consumer partition. Launching with only 4 warps leaves
+        # no consumer to release the empty barriers and deadlocks by design.
+        launch_num_warps = 8
         block_m, block_n, block_k = 64, 16, 16
 
         a = torch.randn(block_m, block_k, device="cuda", dtype=torch.float16).contiguous()
