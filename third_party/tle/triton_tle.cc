@@ -236,6 +236,24 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value &dst, Value &regValues) -> void {
              self.create<ttg::LocalStoreOp>(regValues, dst);
            })
+      .def("create_tle_wgmma",
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, triton::InputPrecision inputPrecision,
+              int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
+             return self.create<tle::WGMMAOp>(
+                 c.getType(), a, b, c, inputPrecision, maxNumImpreciseAcc,
+                 isAsync);
+           })
+      .def("create_tle_wgmma_wait",
+           [](TritonOpBuilder &self, mlir::Value &input,
+              unsigned pendings) -> mlir::Value {
+             auto pendingsAttr =
+                 self.getBuilder().getI32IntegerAttr(pendings);
+             return self
+                 .create<tle::WGMMAWaitOp>(input.getType(), input,
+                                           pendingsAttr)
+                 .getOutput();
+           })
       .def("create_warp_group_dot",
            [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
               mlir::Value &c, triton::InputPrecision inputPrecision,
@@ -596,6 +614,7 @@ void init_triton_tle_passes(py::module &&m) {
                      tle::createTritonTleLowerExclusiveCumsum);
   ADD_PASS_WRAPPER_0("add_lower_async_load",
                      tle::createTritonTleLowerAsyncLoad);
+  ADD_PASS_WRAPPER_0("add_lower_wgmma", tle::createTritonTleLowerWGMMA);
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
   ADD_PASS_WRAPPER_0("add_lower_barriers",

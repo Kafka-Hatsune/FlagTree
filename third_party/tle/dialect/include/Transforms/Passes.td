@@ -254,6 +254,24 @@ def TritonTleLowerAsyncLoad
                            "mlir::triton::TritonDialect"];
 }
 
+def TritonTleLowerWGMMA
+    : Pass<"triton-tle-lower-wgmma", "mlir::ModuleOp"> {
+  let summary = "lower TLE dialect-level WGMMA ops to native TritonGPU WGMMA";
+
+  let description = [{
+    This pass rewrites `tle.wgmma` and `tle.wgmma_wait` to native
+    `ttng.warp_group_dot` and `ttng.warp_group_dot_wait` operations after
+    TritonGPU encodings are available. It materializes accumulator layout
+    conversions at the last responsible point so the frontend does not inject
+    TTG layout ops into the TTIR pipeline.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+                           "mlir::triton::TritonDialect",
+                           "mlir::triton::tle::TleDialect"];
+}
+
 def TritonTleLowerTmaCopy
     : Pass</*cli-arg*/ "triton-tle-lower-tma-copy", /*Op*/ "mlir::ModuleOp"> {
 
