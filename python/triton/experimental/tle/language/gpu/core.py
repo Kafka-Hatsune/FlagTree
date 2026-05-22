@@ -644,15 +644,10 @@ def wgmma(
             raise ValueError(f"wgmma acc dtype must be {ret_scalar_ty}, got {acc.dtype}")
         acc_handle = acc.handle
 
-    num_warps = getattr(builder.options, "num_warps", 4)
-    mma_layout = builder.make_nv_mma_encoding_attr(a.handle, acc_handle, 3, 0, num_warps)
-    acc_mma_ty = builder.get_block_ty_with_encoding(ret_scalar_ty.to_ir(builder), [m, n], mma_layout)
-    acc_mma = builder.create_convert_layout(acc_mma_ty, acc_handle)
-
-    result = builder.create_warp_group_dot(
+    result = builder.create_tle_wgmma(
         a.handle,
         b.handle,
-        acc_mma,
+        acc_handle,
         input_precision,
         max_num_imprecise_acc,
         True,
@@ -671,9 +666,7 @@ def wgmma_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
         raise ValueError("wgmma_wait pendings must be non-negative")
     if not isinstance(acc, tl.tensor):
         raise ValueError(f"wgmma_wait acc must be a tl.tensor, got {type(acc).__name__}")
-    result = _semantic.builder.create_warp_group_dot_wait([acc.handle], pendings)[0]
-    if pendings == 0:
-        result = _semantic.builder.create_convert_layout(acc.type.to_ir(_semantic.builder), result)
+    result = _semantic.builder.create_tle_wgmma_wait(acc.handle, pendings)
     return tensor(result, acc.type)
 
 
