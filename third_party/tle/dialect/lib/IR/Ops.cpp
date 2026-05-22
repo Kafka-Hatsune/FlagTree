@@ -196,6 +196,46 @@ LogicalResult WGMMASharedOperandFenceOp::verify() {
   return success();
 }
 
+LogicalResult WGMMAOp::verify() {
+  auto aType = getA().getType();
+  auto bType = getB().getType();
+  auto cType = cast<RankedTensorType>(getC().getType());
+  auto dType = cast<RankedTensorType>(getD().getType());
+
+  if (aType.getRank() != 2 || bType.getRank() != 2 ||
+      cType.getRank() != 2)
+    return emitOpError("expects rank-2 A, B, and accumulator operands");
+  if (!isa<triton::gpu::SharedMemorySpaceAttr>(aType.getMemorySpace()) ||
+      !isa<triton::gpu::SharedMemorySpaceAttr>(bType.getMemorySpace()))
+    return emitOpError("expects shared-memory A and B descriptors");
+
+  ArrayRef<int64_t> aShape = aType.getShape();
+  ArrayRef<int64_t> bShape = bType.getShape();
+  ArrayRef<int64_t> cShape = cType.getShape();
+  ArrayRef<int64_t> dShape = dType.getShape();
+  if (aShape[1] != bShape[0])
+    return emitOpError("expects A and B K dimensions to match");
+  if (cShape[0] != aShape[0] || cShape[1] != bShape[1])
+    return emitOpError("expects accumulator shape to be MxN from A and B");
+  if (dShape != cShape)
+    return emitOpError("expects result shape to match accumulator shape");
+
+  if (aShape[0] < 64 || aShape[0] % 64 != 0)
+    return emitOpError("expects M dimension to be divisible by 64");
+  if (bShape[1] < 8 || bShape[1] % 8 != 0)
+    return emitOpError("expects N dimension to be divisible by 8");
+  if (aShape[1] < 16)
+    return emitOpError("expects K dimension to be at least 16");
+  return success();
+}
+
+LogicalResult WGMMAWaitOp::verify() {
+  auto pendings = getOperation()->getAttrOfType<IntegerAttr>("pendings");
+  if (pendings.getInt() < 0)
+    return emitOpError("expects non-negative pendings");
+  return success();
+}
+
 static LogicalResult verifyBarrierMemDesc(Operation *op,
                                           triton::gpu::MemDescType type,
                                           bool array) {
