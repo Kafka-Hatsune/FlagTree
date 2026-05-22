@@ -191,6 +191,56 @@ void init_triton_tle_ir(py::module &&m) {
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
            })
+      .def("create_barrier_alloc",
+           [](TritonOpBuilder &self, Type resultType, int32_t numBarriers,
+              int32_t arriveCount, int32_t initPolarity,
+              int32_t expectBytes) -> Value {
+             auto &builder = self.getBuilder();
+             IntegerAttr expectBytesAttr;
+             if (expectBytes > 0)
+               expectBytesAttr = builder.getI32IntegerAttr(expectBytes);
+             return self.create<tle::BarrierAllocOp>(
+                 resultType, builder.getI32IntegerAttr(numBarriers),
+                 builder.getI32IntegerAttr(arriveCount),
+                 builder.getI32IntegerAttr(initPolarity), expectBytesAttr);
+           })
+      .def("create_barrier_wait_mbarrier",
+           [](TritonOpBuilder &self, Value barrier, Value phase) -> void {
+             auto &builder = self.getBuilder();
+             self.create<tle::BarrierWaitOp>(
+                 barrier, phase, builder.getStringAttr("mbarrier"),
+                 builder.getI32IntegerAttr(0), builder.getI32IntegerAttr(0));
+           })
+      .def("create_barrier_wait_named",
+           [](TritonOpBuilder &self, Value barrier, int32_t namedId,
+              int32_t numThreads) -> void {
+             auto &builder = self.getBuilder();
+             self.create<tle::BarrierWaitOp>(
+                 barrier, Value(), builder.getStringAttr("named"),
+                 builder.getI32IntegerAttr(namedId),
+                 builder.getI32IntegerAttr(numThreads));
+           })
+      .def("create_barrier_arrive_mbarrier",
+           [](TritonOpBuilder &self, Value barrier, int32_t arriveCount,
+              py::object phase) -> void {
+             auto &builder = self.getBuilder();
+             Value phaseValue;
+             if (!phase.is_none())
+               phaseValue = py::cast<Value>(phase);
+             self.create<tle::BarrierArriveOp>(
+                 barrier, phaseValue, builder.getStringAttr("mbarrier"),
+                 builder.getI32IntegerAttr(arriveCount),
+                 builder.getI32IntegerAttr(0), builder.getI32IntegerAttr(0));
+           })
+      .def("create_barrier_arrive_named",
+           [](TritonOpBuilder &self, Value barrier, int32_t namedId,
+              int32_t numThreads) -> void {
+             auto &builder = self.getBuilder();
+             self.create<tle::BarrierArriveOp>(
+                 barrier, Value(), builder.getStringAttr("named"),
+                 builder.getI32IntegerAttr(1), builder.getI32IntegerAttr(namedId),
+                 builder.getI32IntegerAttr(numThreads));
+           })
       .def("create_memdesc_subslice",
            [](TritonOpBuilder &self, Type resultType, Value src,
               std::vector<int32_t> &offsets) -> Value {
@@ -468,6 +518,8 @@ void init_triton_tle_passes(py::module &&m) {
                      tle::createTritonTleLowerAsyncLoad);
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
+  ADD_PASS_WRAPPER_0("add_lower_barriers",
+                     tle::createTritonTleLowerBarriers);
   ADD_PASS_WRAPPER_0("add_lower_tma_copy", tle::createTritonTleLowerTmaCopy);
   ADD_PASS_WRAPPER_0("add_schedule_tma_store_sync",
                      tle::createTritonTleScheduleTmaStoreSync);
