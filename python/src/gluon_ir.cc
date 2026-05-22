@@ -980,5 +980,9 @@ void init_gluon_ir(py::module &&m) {
       .def("set_requested_registers", [](ttg::WarpSpecializeOp &self,
                                          std::vector<int> &requestedRegisters) {
         self.setRequestedRegisters(requestedRegisters);
+      })
+      .def("set_warp_group_start_ids", [](ttg::WarpSpecializeOp &self,
+                                          std::vector<int> &warpGroupStartIds) {
+        self.setWarpGroupStartIds(warpGroupStartIds);
       });
 }
