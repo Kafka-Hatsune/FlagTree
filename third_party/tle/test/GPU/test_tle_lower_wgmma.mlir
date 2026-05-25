@@ -84,3 +84,37 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
     tt.return
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 32, transposed = false, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+
+module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @lower_wait1_ordinary_use
+  tt.func @lower_wait1_ordinary_use(
+      %a0: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,
+      %b0: !ttg.memdesc<16x16xf16, #shared, #smem, mutable>,
+      %a1: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,
+      %b1: !ttg.memdesc<16x16xf16, #shared, #smem, mutable>) {
+    %zero = arith.constant dense<0.000000e+00> : tensor<64x16xf32, #blocked>
+    // CHECK: %[[ACC0:.+]] = ttg.convert_layout %{{.+}}
+    // CHECK-NEXT: %[[DOT0:.+]] = ttng.warp_group_dot %a0, %b0, %[[ACC0]]
+    // CHECK-NEXT: %[[ACC1:.+]] = ttg.convert_layout %{{.+}}
+    // CHECK-NEXT: %{{.+}} = ttng.warp_group_dot %a1, %b1, %[[ACC1]]
+    // CHECK-NEXT: %[[WAIT:.+]] = ttng.warp_group_dot_wait %[[DOT0]] {pendings = 1 : i32}
+    // CHECK-NEXT: %[[RELEASED:.+]] = ttg.convert_layout %[[WAIT]]
+    // CHECK-NEXT: "tt.reduce"(%[[RELEASED]])
+    %dot0 = tle.wgmma %a0, %b0, %zero {inputPrecision = 0 : i32, isAsync = true, maxNumImpreciseAcc = 0 : i32} : !ttg.memdesc<64x16xf16, #shared, #smem, mutable> * !ttg.memdesc<16x16xf16, #shared, #smem, mutable>, tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    %dot1 = tle.wgmma %a1, %b1, %zero {inputPrecision = 0 : i32, isAsync = true, maxNumImpreciseAcc = 0 : i32} : !ttg.memdesc<64x16xf16, #shared, #smem, mutable> * !ttg.memdesc<16x16xf16, #shared, #smem, mutable>, tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    %wait = tle.wgmma_wait %dot0 {pendings = 1 : i32} : tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    %red = "tt.reduce"(%wait) <{axis = 1 : i32}> ({
+    ^bb0(%lhs: f32, %rhs: f32):
+      %max = arith.maxnumf %lhs, %rhs : f32
+      tt.reduce.return %max : f32
+    }) : (tensor<64x16xf32, #blocked>) -> tensor<64xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
+    %wait1 = tle.wgmma_wait %dot1 {pendings = 0 : i32} : tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    tt.return
+  }
+}

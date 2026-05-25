@@ -33,6 +33,22 @@ static std::optional<unsigned> getForInitArgIndex(OpOperand &use) {
   return operandNumber - kScfForControlOperands;
 }
 
+static bool isForYield(OpOperand &use) {
+  auto yieldOp = dyn_cast<scf::YieldOp>(use.getOwner());
+  return yieldOp && isa<scf::ForOp>(yieldOp->getParentOp());
+}
+
+static bool isAsyncAccumulatorUse(OpOperand &use) {
+  Operation *user = use.getOwner();
+  if (isa<WGMMAOp>(user))
+    return use.getOperandNumber() == 2;
+  if (isa<WGMMAWaitOp>(user))
+    return true;
+  if (getForInitArgIndex(use))
+    return true;
+  return isForYield(use);
+}
+
 static LogicalResult verifyWGMMAUses(WGMMAOp op) {
   for (OpOperand &use : op.getD().getUses()) {
     Operation *user = use.getOwner();
@@ -196,7 +212,22 @@ struct TritonTleLowerWGMMAPass
         Value waited = nativeWait.getResult(0);
         if (wait.getPendings() > 0) {
           encodedAccs[wait.getOutput()] = waited;
-          wait.getOutput().replaceAllUsesWith(waited);
+          Value released;
+          for (OpOperand &use :
+               llvm::make_early_inc_range(wait.getOutput().getUses())) {
+            if (isAsyncAccumulatorUse(use)) {
+              if (getForInitArgIndex(use))
+                convertLoopCarriedAccumulator(use, waited, encodedAccs);
+              else
+                use.set(waited);
+              continue;
+            }
+
+            if (!released)
+              released = ttg::ConvertLayoutOp::create(
+                  builder, wait.getLoc(), wait.getOutput().getType(), waited);
+            use.set(released);
+          }
           wait.erase();
           continue;
         }
