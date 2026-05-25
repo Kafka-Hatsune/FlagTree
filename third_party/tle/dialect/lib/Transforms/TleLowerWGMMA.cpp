@@ -211,7 +211,10 @@ struct TritonTleLowerWGMMAPass
             builder, wait.getLoc(), waitInputs, wait.getPendings());
         Value waited = nativeWait.getResult(0);
         if (wait.getPendings() > 0) {
-          encodedAccs[wait.getOutput()] = waited;
+          // Rewrite every async accumulator use directly before erasing this
+          // wait. Keeping wait.getOutput() in encodedAccs would leave a map
+          // entry keyed by a soon-to-be-dangling Value; later rewrites may then
+          // accidentally pick an accumulator from another isolated region.
           Value released;
           for (OpOperand &use :
                llvm::make_early_inc_range(wait.getOutput().getUses())) {
