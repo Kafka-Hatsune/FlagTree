@@ -1,4 +1,5 @@
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "tle/dialect/include/IR/Dialect.h"
@@ -20,6 +21,18 @@ namespace ttng = mlir::triton::nvidia_gpu;
 
 namespace {
 
+static constexpr unsigned kScfForControlOperands = 3;
+
+static std::optional<unsigned> getForInitArgIndex(OpOperand &use) {
+  auto forOp = dyn_cast<scf::ForOp>(use.getOwner());
+  if (!forOp)
+    return std::nullopt;
+  unsigned operandNumber = use.getOperandNumber();
+  if (operandNumber < kScfForControlOperands)
+    return std::nullopt;
+  return operandNumber - kScfForControlOperands;
+}
+
 static LogicalResult verifyWGMMAUses(WGMMAOp op) {
   for (OpOperand &use : op.getD().getUses()) {
     Operation *user = use.getOwner();
@@ -30,6 +43,8 @@ static LogicalResult verifyWGMMAUses(WGMMAOp op) {
                             "another tle.wgmma or tle.wgmma_wait");
     }
     if (isa<WGMMAWaitOp>(user))
+      continue;
+    if (getForInitArgIndex(use))
       continue;
     return op.emitOpError("async result must be consumed by tle.wgmma_wait "
                           "before ordinary tensor use");
@@ -68,10 +83,47 @@ static RankedTensorType getMMAType(WGMMAOp op) {
                                mmaEncoding);
 }
 
+static bool isMMAEncoded(Value value) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type)
+    return false;
+  Attribute encoding = type.getEncoding();
+  return encoding && isa<ttg::NvidiaMmaEncodingAttr>(encoding);
+}
+
+static Value lookupEncodedAccumulator(Value value,
+                                      DenseMap<Value, Value> &encodedAccs) {
+  if (Value mapped = encodedAccs.lookup(value))
+    return mapped;
+  if (isMMAEncoded(value))
+    return value;
+  return {};
+}
+
+static void convertLoopCarriedAccumulator(OpOperand &use, Value encodedInit,
+                                          DenseMap<Value, Value> &encodedAccs) {
+  std::optional<unsigned> maybeIndex = getForInitArgIndex(use);
+  if (!maybeIndex)
+    return;
+
+  auto forOp = cast<scf::ForOp>(use.getOwner());
+  unsigned initIndex = *maybeIndex;
+  Type encodedType = encodedInit.getType();
+  forOp->setOperand(use.getOperandNumber(), encodedInit);
+
+  BlockArgument regionArg = forOp.getBody()->getArgument(
+      forOp.getNumInductionVars() + initIndex);
+  regionArg.setType(encodedType);
+  forOp.getResult(initIndex).setType(encodedType);
+
+  encodedAccs[regionArg] = regionArg;
+  encodedAccs[forOp.getResult(initIndex)] = forOp.getResult(initIndex);
+}
+
 static Value materializeMMAAccumulator(OpBuilder &builder, WGMMAOp op,
                                        DenseMap<Value, Value> &encodedAccs) {
   Value acc = op.getC();
-  if (Value mapped = encodedAccs.lookup(acc))
+  if (Value mapped = lookupEncodedAccumulator(acc, encodedAccs))
     return mapped;
 
   RankedTensorType mmaType = getMMAType(op);
@@ -123,11 +175,15 @@ struct TritonTleLowerWGMMAPass
               wgmma.getB(), acc, Value(), wgmma.getInputPrecision(),
               wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
           encodedAccs[wgmma.getD()] = nativeDot.getD();
+          for (OpOperand &use :
+               llvm::make_early_inc_range(wgmma.getD().getUses()))
+            convertLoopCarriedAccumulator(use, nativeDot.getD(), encodedAccs);
           continue;
         }
 
         auto wait = cast<WGMMAWaitOp>(op);
-        Value encodedInput = encodedAccs.lookup(wait.getInput());
+        Value encodedInput =
+            lookupEncodedAccumulator(wait.getInput(), encodedAccs);
         if (!encodedInput) {
           wait.emitOpError("input must be the async result of tle.wgmma");
           failed = true;
@@ -138,6 +194,13 @@ struct TritonTleLowerWGMMAPass
         auto nativeWait = ttng::WarpGroupDotWaitOp::create(
             builder, wait.getLoc(), waitInputs, wait.getPendings());
         Value waited = nativeWait.getResult(0);
+        if (wait.getPendings() > 0) {
+          encodedAccs[wait.getOutput()] = waited;
+          wait.getOutput().replaceAllUsesWith(waited);
+          wait.erase();
+          continue;
+        }
+
         Value released = ttg::ConvertLayoutOp::create(
             builder, wait.getLoc(), wait.getOutput().getType(), waited);
         wait.getOutput().replaceAllUsesWith(released);

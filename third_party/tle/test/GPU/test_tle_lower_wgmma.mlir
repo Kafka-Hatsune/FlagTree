@@ -47,3 +47,40 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
     tt.return
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 32, transposed = false, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+
+module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @lower_loop_carried_wgmma
+  tt.func @lower_loop_carried_wgmma(
+      %a0: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,
+      %b0: !ttg.memdesc<16x16xf16, #shared, #smem, mutable>,
+      %a1: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,
+      %b1: !ttg.memdesc<16x16xf16, #shared, #smem, mutable>) {
+    %lb = arith.constant 0 : index
+    %ub = arith.constant 4 : index
+    %step = arith.constant 1 : index
+    %zero = arith.constant dense<0.000000e+00> : tensor<64x16xf32, #blocked>
+    // CHECK: %[[ACC:.+]] = ttg.convert_layout %{{.+}}
+    // CHECK-NEXT: %[[DOT0:.+]] = ttng.warp_group_dot %a0, %b0, %[[ACC]]
+    // CHECK-NEXT: %[[LOOP:.+]] = scf.for {{.*}} iter_args({{.*}} = %[[DOT0]])
+    // CHECK: %[[DOT1:.+]] = ttng.warp_group_dot %a1, %b1, %{{.+}}
+    // CHECK-NEXT: %[[WAIT1:.+]] = ttng.warp_group_dot_wait %[[DOT1]] {pendings = 1 : i32}
+    // CHECK-NOT: ttg.convert_layout
+    // CHECK: scf.yield %[[WAIT1]]
+    // CHECK: %[[WAIT0:.+]] = ttng.warp_group_dot_wait %[[LOOP]] {pendings = 0 : i32}
+    // CHECK-NEXT: ttg.convert_layout %[[WAIT0]]
+    %dot0 = tle.wgmma %a0, %b0, %zero {inputPrecision = 0 : i32, isAsync = true, maxNumImpreciseAcc = 0 : i32} : !ttg.memdesc<64x16xf16, #shared, #smem, mutable> * !ttg.memdesc<16x16xf16, #shared, #smem, mutable>, tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    %loop = scf.for %i = %lb to %ub step %step iter_args(%acc = %dot0) -> (tensor<64x16xf32, #blocked>) {
+      %dot1 = tle.wgmma %a1, %b1, %acc {inputPrecision = 0 : i32, isAsync = true, maxNumImpreciseAcc = 0 : i32} : !ttg.memdesc<64x16xf16, #shared, #smem, mutable> * !ttg.memdesc<16x16xf16, #shared, #smem, mutable>, tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+      %wait1 = tle.wgmma_wait %dot1 {pendings = 1 : i32} : tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+      scf.yield %wait1 : tensor<64x16xf32, #blocked>
+    }
+    %wait0 = tle.wgmma_wait %loop {pendings = 0 : i32} : tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    tt.return
+  }
+}
