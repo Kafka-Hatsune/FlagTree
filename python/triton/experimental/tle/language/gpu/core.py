@@ -645,7 +645,7 @@ def _require_rank2_wgmma_operand(value, name: str):
 
 
 def _require_transpose_order(order, rank: int, name: str):
-    if len(order) != rank or sorted(order) != list(range(rank)):
+    if len(order) != rank or sorted(order) != list(builtins.range(rank)):
         raise ValueError(f"{name} transpose order must be a permutation of rank {rank}")
 
 
