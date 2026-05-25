@@ -23,6 +23,9 @@ namespace {
 
 constexpr int64_t kFirstVirtualNamedBarrierId = 16;
 constexpr int64_t kNumPhysicalNamedBarriers = 16;
+// Keep virtual TLE allocations in the historical user-visible range. Existing
+// physical id 0 ops are preserved and still block future virtual allocations.
+constexpr int64_t kFirstTleAllocatedPhysicalNamedBarrierId = 1;
 constexpr int64_t kDefaultWarpGroupBarrierIdx = 0;
 constexpr int64_t kSwitchLoopBarrierIdx = 1;
 constexpr int64_t kNumWarpSpecializeReservedBarriers = 2;
@@ -77,11 +80,8 @@ static LogicalResult collectNamedBarrierId(Operation *op, Value idValue,
            << *id << "; expected 0..15 or a TLE virtual id >= "
            << kFirstVirtualNamedBarrierId;
 
-  if (reserved.test(*id))
-    return op->emitOpError("uses physical named barrier id ")
-           << *id << " reserved by warp-specialization lowering; use a TLE "
-           << "virtual named barrier id >= " << kFirstVirtualNamedBarrierId;
-
+  // Physical ids are treated as fixed allocations. They may have been created
+  // by lower-level NVIDIA passes, while TLE virtual ids are remapped below.
   used.set(*id);
   return success();
 }
@@ -95,8 +95,8 @@ allocateVirtualIds(triton::FuncOp func, llvm::SmallBitVector &reserved,
       used.set(i);
   for (auto &entry : virtualToPhysical) {
     int64_t physicalId = -1;
-    for (int64_t candidate = 0; candidate < kNumPhysicalNamedBarriers;
-         ++candidate) {
+    for (int64_t candidate = kFirstTleAllocatedPhysicalNamedBarrierId;
+         candidate < kNumPhysicalNamedBarriers; ++candidate) {
       if (!used.test(candidate)) {
         physicalId = candidate;
         break;
@@ -106,8 +106,10 @@ allocateVirtualIds(triton::FuncOp func, llvm::SmallBitVector &reserved,
     if (physicalId < 0)
       return func.emitError("cannot allocate physical NVIDIA named barrier "
                             "id for virtual TLE named barrier ")
-             << entry.first << "; all " << kNumPhysicalNamedBarriers
-             << " ids are already reserved or used";
+             << entry.first << "; all ids in allocatable range ["
+             << kFirstTleAllocatedPhysicalNamedBarrierId << ", "
+             << (kNumPhysicalNamedBarriers - 1)
+             << "] are already reserved or used";
 
     entry.second = physicalId;
     used.set(physicalId);

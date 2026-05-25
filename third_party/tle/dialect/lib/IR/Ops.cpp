@@ -260,6 +260,7 @@ static LogicalResult verifyBarrierMemDesc(Operation *op,
 static LogicalResult verifyBarrierBackend(Operation *op, StringRef backend,
                                           bool hasPhase, int64_t namedId,
                                           int64_t namedNumThreads) {
+  static constexpr int64_t kFirstVirtualNamedBarrierId = 16;
   if (backend == "mbarrier") {
     if (!hasPhase)
       return op->emitOpError("mbarrier backend requires phase");
@@ -269,8 +270,12 @@ static LogicalResult verifyBarrierBackend(Operation *op, StringRef backend,
     return op->emitOpError("backend must be 'mbarrier' or 'named'");
   if (hasPhase)
     return op->emitOpError("named barrier backend does not accept phase");
-  if (namedId < 1 || namedId > 15)
-    return op->emitOpError("named barrier id must be in range [1, 15]");
+  bool isPhysicalNamedId = namedId >= 1 && namedId <= 15;
+  bool isVirtualNamedId = namedId >= kFirstVirtualNamedBarrierId;
+  if (!isPhysicalNamedId && !isVirtualNamedId)
+    return op->emitOpError("named barrier id must be a physical id in range "
+                           "[1, 15] or a TLE virtual id >= ")
+           << kFirstVirtualNamedBarrierId;
   if (namedNumThreads <= 0)
     return op->emitOpError("named barrier thread count must be positive");
   return success();
