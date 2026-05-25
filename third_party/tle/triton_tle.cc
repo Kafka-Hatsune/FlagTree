@@ -289,6 +289,11 @@ void init_triton_tle_ir(py::module &&m) {
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
            })
+      .def("create_memdesc_trans",
+           [](TritonOpBuilder &self, Value src, std::vector<int> &order)
+               -> Value {
+             return self.create<ttg::MemDescTransOp>(src, order);
+           })
       .def("create_barrier_alloc",
            [](TritonOpBuilder &self, Type resultType, int32_t numBarriers,
               int32_t arriveCount, int32_t initPolarity,
