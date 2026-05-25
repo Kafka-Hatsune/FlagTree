@@ -408,11 +408,15 @@ def _normalize_barrier_init(init) -> str:
     raise ValueError("barrier init must be tle.gpu.PENDING or tle.gpu.READY")
 
 
+# NVIDIA hardware named barriers are ids 0..15. TLE frontend assigns virtual
+# ids from 16 upward so each source barrier is distinguishable until the late
+# compiler pass remaps them to conflict-free physical ids.
+_FIRST_VIRTUAL_NAMED_BARRIER_ID = 16
+
+
 def _reserve_named_barrier_ids(_semantic, count: int) -> int:
-    next_id = getattr(_semantic, "_tle_next_named_barrier_id", 1)
+    next_id = getattr(_semantic, "_tle_next_named_barrier_id", _FIRST_VIRTUAL_NAMED_BARRIER_ID)
     last_id = next_id + count - 1
-    if last_id > 15:
-        raise ValueError("TLE named barrier allocation exhausted ids 1..15")
     setattr(_semantic, "_tle_next_named_barrier_id", last_id + 1)
     return next_id
 
