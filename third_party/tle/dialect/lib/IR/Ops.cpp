@@ -197,17 +197,22 @@ LogicalResult WGMMASharedOperandFenceOp::verify() {
 }
 
 LogicalResult WGMMAOp::verify() {
-  auto aType = getA().getType();
-  auto bType = getB().getType();
+  auto aType = cast<triton::gpu::TensorOrMemDesc>(getA().getType());
+  auto bType = cast<triton::gpu::MemDescType>(getB().getType());
   auto cType = cast<RankedTensorType>(getC().getType());
   auto dType = cast<RankedTensorType>(getD().getType());
 
   if (aType.getRank() != 2 || bType.getRank() != 2 ||
       cType.getRank() != 2)
     return emitOpError("expects rank-2 A, B, and accumulator operands");
-  if (!isa<triton::gpu::SharedMemorySpaceAttr>(aType.getMemorySpace()) ||
-      !isa<triton::gpu::SharedMemorySpaceAttr>(bType.getMemorySpace()))
-    return emitOpError("expects shared-memory A and B descriptors");
+  if (!isa<triton::gpu::SharedMemorySpaceAttr>(bType.getMemorySpace()))
+    return emitOpError("expects shared-memory B descriptor");
+  if (auto aMemDescType =
+          dyn_cast<triton::gpu::MemDescType>(getA().getType())) {
+    if (!isa<triton::gpu::SharedMemorySpaceAttr>(
+            aMemDescType.getMemorySpace()))
+      return emitOpError("expects shared-memory A descriptor");
+  }
 
   ArrayRef<int64_t> aShape = aType.getShape();
   ArrayRef<int64_t> bShape = bType.getShape();

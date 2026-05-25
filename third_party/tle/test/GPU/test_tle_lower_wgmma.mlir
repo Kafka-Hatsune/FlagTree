@@ -55,6 +55,30 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
 #smem = #ttg.shared_memory
 
 module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @lower_register_a_wgmma
+  tt.func @lower_register_a_wgmma(
+      %a: tensor<64x16xf16, #blocked>,
+      %b: !ttg.memdesc<16x16xf16, #shared, #smem, mutable>) {
+    %zero = arith.constant dense<0.000000e+00> : tensor<64x16xf32, #blocked>
+    // CHECK: %[[ZERO:.+]] = arith.constant
+    // CHECK-NEXT: %[[ACC:.+]] = ttg.convert_layout %[[ZERO]]
+    // CHECK-NEXT: %[[A:.+]] = ttg.convert_layout %a
+    // CHECK-NEXT: %[[DOT:.+]] = ttng.warp_group_dot %[[A]], %b, %[[ACC]]
+    // CHECK-NEXT: %[[WAIT:.+]] = ttng.warp_group_dot_wait %[[DOT]] {pendings = 0 : i32}
+    // CHECK-NEXT: ttg.convert_layout %[[WAIT]]
+    %dot = tle.wgmma %a, %b, %zero {inputPrecision = 0 : i32, isAsync = true, maxNumImpreciseAcc = 0 : i32} : tensor<64x16xf16, #blocked> * !ttg.memdesc<16x16xf16, #shared, #smem, mutable>, tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    %wait = tle.wgmma_wait %dot {pendings = 0 : i32} : tensor<64x16xf32, #blocked> -> tensor<64x16xf32, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 32, transposed = false, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+
+module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
   // CHECK-LABEL: tt.func @lower_loop_carried_wgmma
   tt.func @lower_loop_carried_wgmma(
       %a0: !ttg.memdesc<64x16xf16, #shared, #smem, mutable>,

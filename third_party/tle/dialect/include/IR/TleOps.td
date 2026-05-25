@@ -64,6 +64,7 @@ def Tle_TensorType : AnyTypeOf<[TT_Type, TTG_MemDescType]>;
 def Tle_ArgType : AnyTypeOf<[Tle_TensorType, LLVMPointerType, LLVMStructType]>;
 def Tle_LocalPointerResultType : AnyTypeOf<[TT_Tensor, TT_Ptr]>;
 def Tle_LocalPointerIndexType : AnyTypeOf<[TT_Tensor, TT_Int]>;
+def Tle_WGMMAAType : AnyTypeOf<[TT_FpIntTensor, TTG_MemDescType]>;
 
 def Tle_LocalPointersOp : Tle_Op<"local_pointers", [Pure]> {
   let arguments = (ins TTG_MemDescType:$src,
@@ -216,14 +217,15 @@ def Tle_WGMMAOp : Tle_Op<"wgmma", [
 
   let description = [{
     Represents a user-level asynchronous Hopper WGMMA before TritonGPU layout
-    selection for the accumulator is materialized. The `a` and `b` operands are
-    shared-memory descriptors and the accumulator/result are ordinary tensor
-    values in the surrounding IR layout. `triton-tle-lower-wgmma` rewrites this
-    op to `ttg.convert_layout` plus `ttng.warp_group_dot`.
+    selection for the accumulator is materialized. The `a` operand may be a
+    shared-memory descriptor or an in-register tensor, `b` is a shared-memory
+    descriptor, and the accumulator/result are ordinary tensor values in the
+    surrounding IR layout. `triton-tle-lower-wgmma` rewrites this op to
+    `ttg.convert_layout` plus `ttng.warp_group_dot`.
   }];
 
   let arguments = (ins
-    TTG_MemDescType:$a,
+    Tle_WGMMAAType:$a,
     TTG_MemDescType:$b,
     TT_FpIntTensor:$c,
     DefaultValuedAttr<TT_InputPrecisionAttr, "::mlir::triton::InputPrecision::IEEE">:$inputPrecision,
@@ -234,7 +236,7 @@ def Tle_WGMMAOp : Tle_Op<"wgmma", [
   let results = (outs TT_FpIntTensor:$d);
 
   let assemblyFormat = [{
-    $a`,` $b`,` $c attr-dict `:` qualified(type($a)) `*`
+    $a`,` $b`,` $c attr-dict `:` type($a) `*`
     qualified(type($b)) `,` type($c) `->` type($d)
   }];
 

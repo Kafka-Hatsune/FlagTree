@@ -630,6 +630,82 @@ def _require_wgmma_smem_operand(value, name: str) -> tle.buffered_tensor:
     return value
 
 
+def _require_wgmma_bool(value, name: str) -> bool:
+    value = tl._unwrap_if_constexpr(value)
+    if isinstance(value, tl.constexpr):
+        value = value.value
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a compile-time bool")
+    return value
+
+
+def _require_rank2_wgmma_operand(value, name: str):
+    if len(value.type.shape) != 2:
+        raise ValueError(f"{name} transpose currently supports only rank-2 operands")
+
+
+def _require_transpose_order(order, rank: int, name: str):
+    if len(order) != rank or sorted(order) != list(range(rank)):
+        raise ValueError(f"{name} transpose order must be a permutation of rank {rank}")
+
+
+def _transpose_wgmma_smem_operand(value: tle.buffered_tensor, name: str, _semantic) -> tle.buffered_tensor:
+    _require_rank2_wgmma_operand(value, name)
+    order = [1, 0]
+    _require_transpose_order(order, len(value.type.shape), name)
+    handle = _semantic.builder.create_memdesc_trans(value.handle, order)
+    shape = [value.type.shape[i] for i in order]
+
+    alloc_shape = value.type.alloc_shape
+    leading_rank = len(alloc_shape) - len(value.type.shape)
+    alloc_tail = alloc_shape[leading_rank:]
+    transposed_alloc_shape = alloc_shape[:leading_rank] + [alloc_tail[i] for i in order]
+
+    layout = value.type.layout.make_permute(order)
+    return tle.buffered_tensor(
+        handle,
+        value.dtype,
+        shape,
+        value.type.storage,
+        layout,
+        _semantic,
+        alloc_shape=transposed_alloc_shape,
+    )
+
+
+_WGMMA_ALLOWED_OPERAND_TYPE_PAIRS = (
+    (tle.buffered_tensor, tle.buffered_tensor),
+    (tl.tensor, tle.buffered_tensor),
+)
+
+
+def _canonicalize_wgmma_operands(a, b, trans_a: bool, trans_b: bool, _semantic):
+    a = tl._unwrap_if_constexpr(a)
+    b = tl._unwrap_if_constexpr(b)
+
+    if not any(isinstance(a, a_ty) and isinstance(b, b_ty) for a_ty, b_ty in _WGMMA_ALLOWED_OPERAND_TYPE_PAIRS):
+        if isinstance(b, tl.tensor):
+            raise ValueError("wgmma b currently supports only shared-memory buffered_tensor operands; tensor B is unsupported")
+        raise ValueError(
+            "wgmma operands must be one of: "
+            "(shared-memory buffered_tensor, shared-memory buffered_tensor) or "
+            "(tl.tensor, shared-memory buffered_tensor)"
+        )
+
+    if isinstance(a, tle.buffered_tensor):
+        a = _require_wgmma_smem_operand(a, "wgmma a")
+        if trans_a:
+            a = _transpose_wgmma_smem_operand(a, "wgmma a", _semantic)
+    elif trans_a:
+        _require_rank2_wgmma_operand(a, "wgmma a")
+        a = tl.trans(a, _semantic=_semantic)
+
+    b = _require_wgmma_smem_operand(b, "wgmma b")
+    if trans_b:
+        b = _transpose_wgmma_smem_operand(b, "wgmma b", _semantic)
+    return a, b
+
+
 def _wgmma_ret_scalar_ty(lhs_dtype, out_dtype):
     if lhs_dtype.is_int():
         if lhs_dtype != tl.int8:
@@ -660,17 +736,25 @@ def wgmma(
     input_precision=None,
     max_num_imprecise_acc=None,
     out_dtype=tl.float32,
+    trans_a: tl.constexpr = False,
+    trans_b: tl.constexpr = False,
     _semantic=None,
 ) -> tl.tensor:
     """
-    Issue an asynchronous Hopper WGMMA using shared-memory TLE buffers.
+    Issue an asynchronous Hopper WGMMA.
+
+    A may be a shared-memory TLE buffer or a register tensor. B must currently
+    be a shared-memory TLE buffer. ``trans_a`` and ``trans_b`` are rank-2
+    descriptor/tensor transpose requests; shared-memory transposes are emitted
+    as descriptor-only views.
 
     The returned accumulator is an async WGMMA dependency value. Use
     ``tle.gpu.wgmma_wait(pendings, acc)`` before consuming it with ordinary
     tensor operations or storing it.
     """
-    a = _require_wgmma_smem_operand(a, "wgmma a")
-    b = _require_wgmma_smem_operand(b, "wgmma b")
+    trans_a = _require_wgmma_bool(trans_a, "trans_a")
+    trans_b = _require_wgmma_bool(trans_b, "trans_b")
+    a, b = _canonicalize_wgmma_operands(a, b, trans_a, trans_b, _semantic)
 
     m, k = [int(tl._unwrap_if_constexpr(dim)) for dim in a.type.shape]
     k_b, n = [int(tl._unwrap_if_constexpr(dim)) for dim in b.type.shape]

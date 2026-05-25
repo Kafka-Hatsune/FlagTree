@@ -137,18 +137,32 @@ static void convertLoopCarriedAccumulator(OpOperand &use, Value encodedInit,
 }
 
 static Value materializeMMAAccumulator(OpBuilder &builder, WGMMAOp op,
+                                       RankedTensorType mmaType,
                                        DenseMap<Value, Value> &encodedAccs) {
   Value acc = op.getC();
   if (Value mapped = lookupEncodedAccumulator(acc, encodedAccs))
     return mapped;
 
-  RankedTensorType mmaType = getMMAType(op);
-  if (!mmaType)
-    return {};
   auto accType = cast<RankedTensorType>(acc.getType());
   if (accType.getEncoding() == mmaType.getEncoding())
     return acc;
   return ttg::ConvertLayoutOp::create(builder, op.getLoc(), mmaType, acc);
+}
+
+static Value materializeAOperand(OpBuilder &builder, WGMMAOp op,
+                                 RankedTensorType mmaType) {
+  Value a = op.getA();
+  if (isa<ttg::MemDescType>(a.getType()))
+    return a;
+
+  auto aType = cast<RankedTensorType>(a.getType());
+  Attribute dotEncoding = ttg::DotOperandEncodingAttr::get(
+      op.getContext(), /*opIdx=*/0, mmaType.getEncoding(),
+      aType.getElementType());
+  auto dotType = aType.cloneWithEncoding(dotEncoding);
+  if (aType == dotType)
+    return a;
+  return ttg::ConvertLayoutOp::create(builder, op.getLoc(), dotType, a);
 }
 
 struct TritonTleLowerWGMMAPass
@@ -181,14 +195,21 @@ struct TritonTleLowerWGMMAPass
       for (Operation *op : worklist) {
         OpBuilder builder(op);
         if (auto wgmma = dyn_cast<WGMMAOp>(op)) {
-          Value acc = materializeMMAAccumulator(builder, wgmma, encodedAccs);
+          RankedTensorType mmaType = getMMAType(wgmma);
+          if (!mmaType) {
+            failed = true;
+            return;
+          }
+          Value acc =
+              materializeMMAAccumulator(builder, wgmma, mmaType, encodedAccs);
+          Value a = materializeAOperand(builder, wgmma, mmaType);
           if (!acc) {
             failed = true;
             return;
           }
           auto nativeDot = ttng::WarpGroupDotOp::create(
-              builder, wgmma.getLoc(), acc.getType(), wgmma.getA(),
-              wgmma.getB(), acc, Value(), wgmma.getInputPrecision(),
+              builder, wgmma.getLoc(), acc.getType(), a, wgmma.getB(), acc,
+              Value(), wgmma.getInputPrecision(),
               wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
           encodedAccs[wgmma.getD()] = nativeDot.getD();
           for (OpOperand &use :
