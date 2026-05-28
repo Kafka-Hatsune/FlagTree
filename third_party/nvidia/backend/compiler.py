@@ -309,6 +309,7 @@ class CUDABackend(BaseBackend):
         tle.passes.add_optimize_local_pointer_stores(pm)
         # end flagtree tle
         passes.ttgpuir.add_accelerate_matmul(pm)
+        tle.passes.add_lower_wgmma(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         tle.passes.add_promote_local_store_staging(pm)

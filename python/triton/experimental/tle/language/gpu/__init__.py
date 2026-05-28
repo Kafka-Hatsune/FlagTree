@@ -13,6 +13,8 @@ from .core import (
     memory_space,
     local_ptr,
     warp_specialize,
+    wgmma,
+    wgmma_wait,
 )
 from .types import (layout, shared_layout, swizzled_shared_layout, tensor_memory_layout, nv_mma_shared_layout, scope,
                     buffered_tensor, buffered_tensor_type, barrier, barrier_type, smem, tmem, PENDING, READY)
@@ -33,6 +35,8 @@ __all__ = [
     "async_tasks",
     "local_ptr",
     "warp_specialize",
+    "wgmma",
+    "wgmma_wait",
     "storage_kind",
     "layout",
     "memory_space",
