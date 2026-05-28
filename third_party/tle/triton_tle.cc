@@ -164,7 +164,23 @@ void init_triton_tle_ir(py::module &&m) {
       .def("create_tma_copy",
            [](TritonOpBuilder &self, Value src, Value dst,
               std::vector<Value> &indices) {
-             self.create<ttg::TMACopyOp>(src, dst, indices);
+             self.create<ttg::TMACopyOp>(src, dst, indices, Value(),
+                                         IntegerAttr());
+             return;
+           })
+      .def("create_tma_copy",
+           [](TritonOpBuilder &self, Value src, Value dst,
+              std::vector<Value> &indices, py::object barrier,
+              int32_t expectBytes) {
+             auto &builder = self.getBuilder();
+             Value barrierValue;
+             if (!barrier.is_none())
+               barrierValue = py::cast<Value>(barrier);
+             IntegerAttr expectBytesAttr;
+             if (expectBytes > 0)
+               expectBytesAttr = builder.getI32IntegerAttr(expectBytes);
+             self.create<ttg::TMACopyOp>(src, dst, indices, barrierValue,
+                                         expectBytesAttr);
              return;
            })
       .def("create_local_load",
