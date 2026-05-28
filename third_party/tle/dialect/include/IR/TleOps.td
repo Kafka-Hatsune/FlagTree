@@ -7,6 +7,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/CommonTypeConstraints.td"
 include "tle/dialect/include/IR/TleDialect.td"
 include "tle/dialect/include/IR/TleAttrDefs.td"
+include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td"
@@ -63,6 +64,7 @@ def Tle_TensorType : AnyTypeOf<[TT_Type, TTG_MemDescType]>;
 def Tle_ArgType : AnyTypeOf<[Tle_TensorType, LLVMPointerType, LLVMStructType]>;
 def Tle_LocalPointerResultType : AnyTypeOf<[TT_Tensor, TT_Ptr]>;
 def Tle_LocalPointerIndexType : AnyTypeOf<[TT_Tensor, TT_Int]>;
+def Tle_WGMMAAType : AnyTypeOf<[TT_FpIntTensor, TTG_MemDescType]>;
 
 def Tle_LocalPointersOp : Tle_Op<"local_pointers", [Pure]> {
   let arguments = (ins TTG_MemDescType:$src,
@@ -207,6 +209,56 @@ def Tle_WGMMASharedOperandFenceOp : Tle_Op<"wgmma_shared_operand_fence"> {
   }];
 
   let assemblyFormat = "$deps attr-dict `:` type($deps)";
+  let hasVerifier = 1;
+}
+
+def Tle_WGMMAOp : Tle_Op<"wgmma", [
+    TypesMatchWith<"result's type matches accumulator's type", "d", "c", "$_self">
+]> {
+  let summary = "TLE dialect-level Hopper WGMMA";
+
+  let description = [{
+    Represents a user-level asynchronous Hopper WGMMA before TritonGPU layout
+    selection for the accumulator is materialized. The `a` operand may be a
+    shared-memory descriptor or an in-register tensor, `b` is a shared-memory
+    descriptor, and the accumulator/result are ordinary tensor values in the
+    surrounding IR layout. `triton-tle-lower-wgmma` rewrites this op to
+    `ttg.convert_layout` plus `ttng.warp_group_dot`.
+  }];
+
+  let arguments = (ins
+    Tle_WGMMAAType:$a,
+    TTG_MemDescType:$b,
+    TT_FpIntTensor:$c,
+    DefaultValuedAttr<TT_InputPrecisionAttr, "::mlir::triton::InputPrecision::IEEE">:$inputPrecision,
+    DefaultValuedAttr<I32Attr, "0">:$maxNumImpreciseAcc,
+    DefaultValuedAttr<BoolAttr, "true">:$isAsync
+  );
+
+  let results = (outs TT_FpIntTensor:$d);
+
+  let assemblyFormat = [{
+    $a`,` $b`,` $c attr-dict `:` type($a) `*`
+    qualified(type($b)) `,` type($c) `->` type($d)
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Tle_WGMMAWaitOp : Tle_Op<"wgmma_wait", [
+    TypesMatchWith<"result's type matches input's type", "output", "input", "$_self">
+]> {
+  let summary = "wait for TLE dialect-level asynchronous Hopper WGMMA";
+
+  let arguments = (ins
+    TT_FpIntTensor:$input,
+    I32Attr:$pendings
+  );
+
+  let results = (outs TT_FpIntTensor:$output);
+
+  let assemblyFormat = "$input attr-dict `:` type($input) `->` type($output)";
+
   let hasVerifier = 1;
 }
 
