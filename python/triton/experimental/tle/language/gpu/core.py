@@ -475,7 +475,9 @@ def _barrier_slot(value: tle.barrier, _semantic) -> tle.barrier:
 
 
 def _record_barrier_backend(slot: tle.barrier, backend: str, _semantic) -> None:
-    if slot.named_base_id > 0 and slot.static_index is not None:
+    if slot.allocation_key is not None and slot.static_index is not None:
+        key = (slot.allocation_key, slot.static_index)
+    elif slot.named_base_id > 0 and slot.static_index is not None:
         key = (slot.named_base_id, slot.static_index)
     else:
         key = _barrier_handle_key(slot.handle)
@@ -487,6 +489,22 @@ def _record_barrier_backend(slot: tle.barrier, backend: str, _semantic) -> None:
     if previous is not None and previous != backend:
         raise ValueError("cannot mix named and mbarrier backends for the same barrier slot")
     uses[key] = backend
+
+
+def _tma_completion_barrier_slot(value, _semantic) -> tle.barrier:
+    if not isinstance(value, tle.barrier):
+        raise ValueError(f"TMA copy barrier expects tle.gpu barrier, got {type(value).__name__}")
+    if not value.is_slot and value.num_barriers != 1:
+        raise ValueError("TMA copy barrier arrays must be indexed, e.g. bars[i]")
+
+    slot = _barrier_slot(value, _semantic)
+    if slot.expect_bytes is None:
+        raise ValueError("TMA copy barrier must be allocated with expect_bytes")
+    if not isinstance(slot.expect_bytes, int) or slot.expect_bytes <= 0:
+        raise ValueError("TMA copy barrier expect_bytes must be a positive compile-time integer")
+
+    _record_barrier_backend(slot, "mbarrier", _semantic)
+    return slot
 
 
 @tl.builtin
@@ -603,6 +621,7 @@ def copy(
     dst,
     shape,
     offsets: Sequence[constexpr | tensor] = None,
+    barrier=None,
     _semantic=None,
 ) -> None:
     """
@@ -633,6 +652,8 @@ def copy(
         shape: Tuple specifying the dimensions of the data to copy
         offsets: Sequence of offsets for multi-dimensional addressing. Used with TMA operations
             to specify the starting coordinates within the tensor. Required for TMA copy.
+        barrier: Optional TLE GPU mbarrier completion barrier for global-to-shared TMA copy.
+            The barrier must come from ``tle.gpu.alloc_barrier(s)(expect_bytes=...)``.
         _semantic: Internal semantic analyzer for validation and compilation (user-provided)
 
     Raises:
@@ -646,6 +667,11 @@ def copy(
 
         TMA copy with offsets:
             tle.copy(tma_desc, local_buf, [64, 64], [x_offset, y_offset])
+
+        TMA copy with explicit completion barrier:
+            bar = tle.gpu.alloc_barrier(expect_bytes=64 * 64 * 2)
+            tle.copy(tma_desc, local_buf, [64, 64], [x_offset, y_offset], barrier=bar)
+            tle.gpu.barrier_wait(bar, phaseIdx=0)
     """
 
     def normcopy(
@@ -694,6 +720,7 @@ def copy(
         direction,
         shape: tuple,
         offsets: Sequence[constexpr | tensor],
+        barrier=None,
         _semantic=None,
     ) -> None:
         # Parameter validation
@@ -733,11 +760,20 @@ def copy(
             else:
                 raise ValueError(f"Shape parameter must be tuple or list, but got {type(shape)}")
 
+        barrier_slot = None
+        expect_bytes = -1
+        if barrier is not None:
+            if direction != CopyDirection.GM_TO_LOCAL:
+                raise ValueError("TMA copy barrier is only supported for global-to-shared TMA copy")
+            barrier_slot = _tma_completion_barrier_slot(barrier, _semantic)
+            expect_bytes = barrier_slot.expect_bytes
+
         # Note: Skip shape assertion at this level since it requires _semantic context
         # assert desc.shape == shape, "Shape mismatch between descriptor and provided shape"
         assert len(offsets) == len(desc.shape), "Offsets and shape must have the same length"
         offsets = _semantic._convert_to_ir_values(offsets, require_i64=False)
-        _semantic.builder.create_tma_copy(src.handle, dst.handle, offsets)
+        _semantic.builder.create_tma_copy(src.handle, dst.handle, offsets,
+                                          None if barrier_slot is None else barrier_slot.handle, expect_bytes)
         return
 
     # Parameter validation
@@ -778,9 +814,11 @@ def copy(
         else:
             raise ValueError(f"Shape parameter must be tuple or list, but got {type(shape)}")
     if is_normcopy:
+        if barrier is not None:
+            raise ValueError("copy barrier is only supported for TMA global-to-shared copy")
         return normcopy(src, dst, shape, direction, _semantic)
     else:
-        return tmacopy(src, dst, direction, shape, offsets, _semantic)
+        return tmacopy(src, dst, direction, shape, offsets, barrier, _semantic)
 
 
 def _expand_index_to_shape(index: tl.tensor, shape: Sequence[int], axis: int, _semantic) -> tl.tensor:
