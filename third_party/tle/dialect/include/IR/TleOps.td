@@ -210,6 +210,46 @@ def Tle_WGMMASharedOperandFenceOp : Tle_Op<"wgmma_shared_operand_fence"> {
   let hasVerifier = 1;
 }
 
+def Tle_BarrierAllocOp : Tle_Op<"barrier.alloc"> {
+  let summary = "create a typed TLE GPU barrier array";
+  let arguments = (ins
+    I32Attr:$num_barriers,
+    I32Attr:$arrive_count,
+    I32Attr:$init_polarity,
+    OptionalAttr<I32Attr>:$expect_bytes
+  );
+  let results = (outs TTG_MemDescType:$result);
+  let assemblyFormat = "attr-dict `:` qualified(type($result))";
+  let hasVerifier = 1;
+}
+
+def Tle_BarrierWaitOp : Tle_Op<"barrier.wait"> {
+  let summary = "wait on a TLE GPU barrier slot";
+  let arguments = (ins
+    TTG_MemDescType:$barrier,
+    Optional<I32>:$phase,
+    StrAttr:$backend,
+    I32Attr:$named_id,
+    I32Attr:$named_num_threads
+  );
+  let assemblyFormat = "$barrier (`,` $phase^)? attr-dict `:` qualified(type($barrier))";
+  let hasVerifier = 1;
+}
+
+def Tle_BarrierArriveOp : Tle_Op<"barrier.arrive"> {
+  let summary = "arrive on a TLE GPU barrier slot";
+  let arguments = (ins
+    TTG_MemDescType:$barrier,
+    Optional<I32>:$phase,
+    StrAttr:$backend,
+    I32Attr:$arrive_count,
+    I32Attr:$named_id,
+    I32Attr:$named_num_threads
+  );
+  let assemblyFormat = "$barrier (`,` $phase^)? attr-dict `:` qualified(type($barrier))";
+  let hasVerifier = 1;
+}
+
 def Tle_TMAStoreCommitGroupOp
     : Tle_Op<"tma_store.commit_group", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "commit the current TMA store bulk group";
