@@ -515,6 +515,13 @@ class TestIntegration:
         assert hasattr(tle.gpu, 'pipeline')
         assert hasattr(tle.gpu, 'storage_kind')
         assert hasattr(tle.gpu, 'buffered_tensor')
+        assert hasattr(tle.gpu, 'alloc_barriers')
+        assert hasattr(tle.gpu, 'alloc_barrier')
+        assert hasattr(tle.gpu, 'barrier_wait')
+        assert hasattr(tle.gpu, 'barrier_arrive')
+        assert hasattr(tle.gpu, 'PENDING')
+        assert hasattr(tle.gpu, 'READY')
+        assert not hasattr(tle.gpu, 'barrier_expect_bytes')
 
     def test_tle_functions_have_docstrings(self):
         """Test TLE functions have docstrings"""
