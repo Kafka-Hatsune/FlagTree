@@ -191,14 +191,18 @@ class nv_mma_shared_layout(shared_layout):
     """
 
     def make_permute(self, dims):
-        permuted_order = tuple(self.order[d] for d in dims)
+        permuted_shape = [self.shape[d] for d in dims]
+        permuted_order = [self.order[d] for d in dims]
+        permuted_num_ctas_per_cga = [self.numCTAsPerCGA[d] for d in dims]
+        permuted_num_cta_split = [self.numCTASplit[d] for d in dims]
+        permuted_num_cta_order = [self.numCTAOrder[d] for d in dims]
         return nv_mma_shared_layout(
-            self.shape,
+            permuted_shape,
             permuted_order,
             self.elemType,
-            self.numCTAsPerCGA,
-            self.numCTASplit,
-            self.numCTAOrder,
+            permuted_num_ctas_per_cga,
+            permuted_num_cta_split,
+            permuted_num_cta_order,
             self.fp4Padded,
             self.swizzled,
         )

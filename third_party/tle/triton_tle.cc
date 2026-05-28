@@ -147,6 +147,51 @@ void init_triton_tle_ir(py::module &&m) {
                  context, blockM, blockN, colStride, CTASplitM, CTASplitN,
                  /*twoCTAs=*/false));
            })
+      .def("make_nv_mma_encoding_attr",
+           [](TritonOpBuilder &self, Value opndA, Value opndAcc,
+              unsigned versionMajor, unsigned versionMinor,
+              unsigned moduleNumWarps) {
+             auto context = self.getBuilder().getContext();
+             auto dtypeA =
+                 cast<ttg::TensorOrMemDesc>(opndA.getType()).getElementType();
+             auto retType = cast<RankedTensorType>(opndAcc.getType());
+             Operation *parentOp =
+                 self.getBuilder().getInsertionBlock()->getParentOp();
+             unsigned numWarps =
+                 ttg::maybeLookupNumWarps(parentOp).value_or(moduleNumWarps);
+             auto instrShape = mmaVersionToInstrShape(
+                 versionMajor, retType.getShape(), dtypeA, numWarps);
+
+             // Match the current Hopper WGMMA lowering convention: partition
+             // the accumulator rows across the warp group.
+             SmallVector<unsigned, 2> warpsPerCTA = {numWarps, 1};
+             SmallVector<unsigned, 2> CTAsPerCGA = {1, 1};
+             SmallVector<unsigned, 2> CTASplitNum = {1, 1};
+             SmallVector<unsigned, 2> CTAOrder = {1, 0};
+             auto CTALayout = ttg::CTAEncodingAttr::fromSplitParams(
+                 context, CTAsPerCGA, CTASplitNum, CTAOrder);
+             return mlir::cast<Attribute>(ttg::NvidiaMmaEncodingAttr::get(
+                 context, versionMajor, versionMinor, warpsPerCTA, CTALayout,
+                 instrShape));
+           })
+      .def("make_dot_operand_encoding_attr",
+           [](TritonOpBuilder &self, Value opnd, unsigned opIdx,
+              Attribute parentEnc) -> Attribute {
+             auto context = self.getBuilder().getContext();
+             auto eltType =
+                 cast<RankedTensorType>(opnd.getType()).getElementType();
+             return ttg::DotOperandEncodingAttr::get(context, opIdx, parentEnc,
+                                                     eltType);
+           })
+      .def("get_block_ty_with_encoding",
+           [](TritonOpBuilder &self, Type &elementType,
+              std::vector<int64_t> &shape, Attribute &encoding) -> Type {
+             return RankedTensorType::get(shape, elementType, encoding);
+           })
+      .def("create_convert_layout",
+           [](TritonOpBuilder &self, Type resultTy, Value value) -> Value {
+             return self.create<ttg::ConvertLayoutOp>(resultTy, value);
+           })
       .def("create_local_alloc",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
               Type &elementType, Attribute &encoding) -> mlir::Value {
@@ -191,6 +236,43 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value &dst, Value &regValues) -> void {
              self.create<ttg::LocalStoreOp>(regValues, dst);
            })
+      .def("create_tle_wgmma",
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, triton::InputPrecision inputPrecision,
+              int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
+             return self.create<tle::WGMMAOp>(
+                 c.getType(), a, b, c, inputPrecision, maxNumImpreciseAcc,
+                 isAsync);
+           })
+      .def("create_tle_wgmma_wait",
+           [](TritonOpBuilder &self, mlir::Value &input,
+              unsigned pendings) -> mlir::Value {
+             auto pendingsAttr =
+                 self.getBuilder().getI32IntegerAttr(pendings);
+             return self
+                 .create<tle::WGMMAWaitOp>(input.getType(), input,
+                                           pendingsAttr)
+                 .getOutput();
+           })
+      .def("create_warp_group_dot",
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, triton::InputPrecision inputPrecision,
+              int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
+             return self.create<ttng::WarpGroupDotOp>(
+                 c.getType(), a, b, c, Value(), inputPrecision,
+                 maxNumImpreciseAcc, isAsync);
+           })
+      .def("create_warp_group_dot_wait",
+           [](TritonOpBuilder &self, std::vector<Value> inputs,
+              unsigned pendings) -> std::vector<Value> {
+             auto waitOp =
+                 self.create<ttng::WarpGroupDotWaitOp>(inputs, pendings);
+             std::vector<Value> outputs;
+             outputs.reserve(waitOp->getNumResults());
+             for (Value result : waitOp->getResults())
+               outputs.push_back(result);
+             return outputs;
+           })
       .def("create_local_pointers",
            [](TritonOpBuilder &self, Type resultTy, Value memDesc,
               py::args args) -> OpState {
@@ -206,6 +288,11 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, Type resultType, Value src,
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
+           })
+      .def("create_memdesc_trans",
+           [](TritonOpBuilder &self, Value src, std::vector<int> &order)
+               -> Value {
+             return self.create<ttg::MemDescTransOp>(src, order);
            })
       .def("create_barrier_alloc",
            [](TritonOpBuilder &self, Type resultType, int32_t numBarriers,
@@ -532,6 +619,7 @@ void init_triton_tle_passes(py::module &&m) {
                      tle::createTritonTleLowerExclusiveCumsum);
   ADD_PASS_WRAPPER_0("add_lower_async_load",
                      tle::createTritonTleLowerAsyncLoad);
+  ADD_PASS_WRAPPER_0("add_lower_wgmma", tle::createTritonTleLowerWGMMA);
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
   ADD_PASS_WRAPPER_0("add_lower_barriers",
