@@ -273,6 +273,41 @@ def TritonTleLowerTmaCopy
                            "mlir::arith::ArithDialect"];
 }
 
+def TritonTleLowerBarriers
+    : Pass<"triton-tle-lower-barriers", "mlir::ModuleOp"> {
+  let summary = "lower TLE GPU barrier operations to NVIDIA barrier ops";
+
+  let description = [{
+    This pass lowers the public ``tle.gpu`` barrier API IR.  Mbarrier-backed
+    barriers become shared i64 allocations plus ttng init/wait/arrive ops.
+    Named barriers become statically numbered ttng named barrier ops.
+  }];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+                           "mlir::triton::tle::TleDialect"];
+}
+
+def TritonTleAllocateNamedBarriers
+    : Pass<"triton-tle-allocate-named-barriers", "mlir::ModuleOp"> {
+  let summary = "allocate physical NVIDIA named barrier ids for TLE virtual ids";
+
+  let description = [{
+    This pass rewrites TLE virtual named barrier ids into physical NVIDIA
+    hardware named barrier ids. TLE frontend ids start at 16 so each user
+    barrier remains distinguishable in IR before this late pass. The pass
+    reserves the barrier ids used by warp-specialization lowering, preserves
+    existing physical ids in the 0..15 range, and assigns virtual ids to free
+    physical ids.
+  }];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
 def TritonTleScheduleTmaStoreSync
     : Pass<"triton-tle-schedule-tma-store-sync", "mlir::ModuleOp"> {
   let summary = "schedule explicit TLE TMA store commit and wait operations";
