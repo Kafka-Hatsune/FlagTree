@@ -108,8 +108,9 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
       // CHECK-NEXT: %[[WAIT1:.+]] = ttng.warp_group_dot_wait %[[DOT]]
       // CHECK-SAME: {pendings = 1 : i32}
       %wait1 = ttng.warp_group_dot_wait %dot {pendings = 1 : i32} : tensor<64x64xf32, #mma>
-      // CHECK-NOT: ttng.warp_group_dot_wait
-      // CHECK: scf.yield %[[WAIT1]]
+      // CHECK: %[[YIELD_WAIT:.+]]:{{.*}} = ttng.warp_group_dot_wait %[[WAIT1]]
+      // CHECK-SAME: {pendings = 0 : i32}
+      // CHECK: scf.yield %[[YIELD_WAIT]]#0
       scf.yield %wait1 : tensor<64x64xf32, #mma>
     }
     // CHECK: %[[WAIT0:.+]] = ttng.warp_group_dot_wait %[[RES]]

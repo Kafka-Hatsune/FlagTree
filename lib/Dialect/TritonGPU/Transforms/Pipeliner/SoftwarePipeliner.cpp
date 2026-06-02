@@ -1,5 +1,8 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
+#ifdef __TLE__
+#include "TleWGMMAAnalysis.h"
+#endif
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -34,14 +37,32 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUPIPELINE
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-static void pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
+static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages,
+                                   StringRef tleWgmmaPipelineMode) {
+  if (tleWgmmaPipelineMode != "compiler_auto" &&
+      tleWgmmaPipelineMode != "user_promise") {
+    moduleOp.emitError("TLE WGMMA pipeline mode must be 'compiler_auto' or "
+                       "'user_promise', got '")
+        << tleWgmmaPipelineMode << "'";
+    return failure();
+  }
+
   SmallVector<scf::ForOp> loops;
   moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
 
   for (scf::ForOp forOp : loops) {
-    if (getNumStagesOrDefault(forOp, numStages) >= 1)
-      mlir::triton::asyncLaunchDots(forOp);
+    if (getNumStagesOrDefault(forOp, numStages) < 1)
+      continue;
+#ifdef __TLE__
+    if (tleWgmmaPipelineMode == "compiler_auto")
+      mlir::triton::gpu::detail::scheduleTleWgmmaCompilerAutoPipeline(forOp);
+    else
+      mlir::triton::gpu::detail::scheduleTleWgmmaUserPromisePipeline(forOp);
+#else
+    mlir::triton::asyncLaunchDots(forOp);
+#endif
   }
+  return success();
 }
 
 static bool hasMMAv5WaitsInLastStage(scf::ForOp forOp,
@@ -194,7 +215,8 @@ struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
     // Cleanup the IR from the pipeline attributes.
     removePipeliningAttributes(moduleOp);
 
-    pipelineWgmma(moduleOp, numStages);
+    if (failed(pipelineWgmma(moduleOp, numStages, tleWgmmaPipelineMode)))
+      return signalPassFailure();
 
     // schedule the waits
     mlir::triton::updateWaits(getOperation());

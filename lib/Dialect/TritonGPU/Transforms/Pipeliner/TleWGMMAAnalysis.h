@@ -59,7 +59,8 @@ private:
   const TlePipeResourceAnalysis &resources;
 };
 
-void scheduleTleWgmmaAsyncLaunch(scf::ForOp forOp);
+void scheduleTleWgmmaCompilerAutoPipeline(scf::ForOp forOp);
+void scheduleTleWgmmaUserPromisePipeline(scf::ForOp forOp);
 
 } // namespace mlir::triton::gpu::detail
 
