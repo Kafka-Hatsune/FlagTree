@@ -297,6 +297,7 @@ def alloc(
         else:
             raise ValueError(f"Shape parameter must be tuple or list, but got {type(shape)}")
 
+    dtype = tl._unwrap_if_constexpr(dtype)
     if not isinstance(dtype, tl.dtype):
         raise ValueError(f"Data type must be tl.dtype, but got {type(dtype)}")
 
@@ -327,7 +328,6 @@ def alloc(
     try:
         unwrapped_shape = [tl._unwrap_if_constexpr(dim) for dim in shape]
         full_shape = unwrapped_shape
-        dtype = tl._unwrap_if_constexpr(dtype)
         elem_type = dtype.to_ir(_semantic.builder)
 
         if layout is None:
