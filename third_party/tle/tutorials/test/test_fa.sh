@@ -7,8 +7,8 @@ PARENT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 echo "$SCRIPT_DIR"
 
 python "${PARENT_DIR}/tle_hopper_fa_ws_pipelined_pingpong_persistent.py" \
-  --warmup 5 \
-  --rep 20 \
+  --warmup 25 \
+  --rep 100 \
   --block-m 128 \
   --block-n 128 \
   --cuda-graph \
