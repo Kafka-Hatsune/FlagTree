@@ -17,8 +17,20 @@ from triton.language.core import (
 # Address space 3 matches the shared-memory space used in TritonGPU lowering.
 SHARED_MEMORY_ADDRESS_SPACE = 3
 
+_WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
+_WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
+
 
 _async_task_state = threading.local()
+
+
+def _mark_wgmma_user_promise(_semantic, _generator):
+    if _generator is None or _semantic is None:
+        return
+    _generator.module.set_attr(
+        _WGMMA_PIPELINE_MODE_ATTR,
+        _semantic.builder.get_string_attr(_WGMMA_PIPELINE_MODE_USER_PROMISE),
+    )
 
 
 def _get_async_task_replica_id_stack():
@@ -515,8 +527,11 @@ def alloc_barriers(
     init=tle.PENDING,
     expect_bytes=None,
     _semantic=None,
+    _generator=None,
 ) -> tle.barrier:
     """Allocate a TLE GPU barrier array."""
+    _mark_wgmma_user_promise(_semantic, _generator)
+
     num_barriers = _require_barrier_int(num_barriers, "num_barriers")
     arrive_count = _require_barrier_int(arrive_count, "arrive_count")
     init = _normalize_barrier_init(init)
@@ -555,9 +570,17 @@ def alloc_barrier(
     init=tle.PENDING,
     expect_bytes=None,
     _semantic=None,
+    _generator=None,
 ) -> tle.barrier:
     """Allocate a single TLE GPU barrier."""
-    return alloc_barriers(1, arrive_count=arrive_count, init=init, expect_bytes=expect_bytes, _semantic=_semantic)
+    _mark_wgmma_user_promise(_semantic, _generator)
+    return alloc_barriers(
+        1,
+        arrive_count,
+        init,
+        expect_bytes,
+        _semantic=_semantic,
+    )
 
 
 @tl.builtin
@@ -824,8 +847,9 @@ def wgmma(
 
 
 @tl.builtin
-def wgmma_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
+def wgmma_wait(pendings, acc=None, _semantic=None, _generator=None) -> tl.tensor:
     """Wait until ``pendings`` or fewer async WGMMA groups remain outstanding."""
+    _mark_wgmma_user_promise(_semantic, _generator)
     if acc is None and isinstance(pendings, tl.tensor):
         acc = pendings
         pendings = 0
