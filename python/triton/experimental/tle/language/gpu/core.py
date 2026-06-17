@@ -16,6 +16,8 @@ from triton.language.core import (
 
 # Address space 3 matches the shared-memory space used in TritonGPU lowering.
 SHARED_MEMORY_ADDRESS_SPACE = 3
+_WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
+_WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
 
 
 _async_task_state = threading.local()
@@ -508,15 +510,25 @@ def _tma_completion_barrier_slot(value, _semantic) -> tle.barrier:
     return slot
 
 
-@tl.builtin
-def alloc_barriers(
+def _alloc_barriers_impl(
     num_barriers,
     arrive_count=1,
     init=tle.PENDING,
     expect_bytes=None,
     _semantic=None,
+    _generator=None,
+    _mark_user_promise=False,
 ) -> tle.barrier:
     """Allocate a TLE GPU barrier array."""
+    # Route selection is tied to the exact public API surface.  The plural
+    # alloc_barriers API is a user-promise signal; alloc_barrier reuses this
+    # lowering path without setting the module attribute.
+    if _mark_user_promise and _generator is not None and _semantic is not None:
+        _generator.module.set_attr(
+            _WGMMA_PIPELINE_MODE_ATTR,
+            _semantic.builder.get_string_attr(_WGMMA_PIPELINE_MODE_USER_PROMISE),
+        )
+
     num_barriers = _require_barrier_int(num_barriers, "num_barriers")
     arrive_count = _require_barrier_int(arrive_count, "arrive_count")
     init = _normalize_barrier_init(init)
@@ -550,6 +562,27 @@ def alloc_barriers(
 
 
 @tl.builtin
+def alloc_barriers(
+    num_barriers,
+    arrive_count=1,
+    init=tle.PENDING,
+    expect_bytes=None,
+    _semantic=None,
+    _generator=None,
+) -> tle.barrier:
+    """Allocate a TLE GPU barrier array."""
+    return _alloc_barriers_impl(
+        num_barriers,
+        arrive_count,
+        init,
+        expect_bytes,
+        _semantic=_semantic,
+        _generator=_generator,
+        _mark_user_promise=True,
+    )
+
+
+@tl.builtin
 def alloc_barrier(
     arrive_count=1,
     init=tle.PENDING,
@@ -557,7 +590,7 @@ def alloc_barrier(
     _semantic=None,
 ) -> tle.barrier:
     """Allocate a single TLE GPU barrier."""
-    return alloc_barriers(1, arrive_count=arrive_count, init=init, expect_bytes=expect_bytes, _semantic=_semantic)
+    return _alloc_barriers_impl(1, arrive_count=arrive_count, init=init, expect_bytes=expect_bytes, _semantic=_semantic)
 
 
 @tl.builtin
@@ -824,8 +857,32 @@ def wgmma(
 
 
 @tl.builtin
-def wgmma_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
+def wgmma_wait(pendings, acc=None, _semantic=None, _generator=None) -> tl.tensor:
     """Wait until ``pendings`` or fewer async WGMMA groups remain outstanding."""
+    # wgmma_wait is a user-promise routing signal.  It lowers to the same wait
+    # op as async_dot_wait, but also marks the current module for the
+    # user-promise WGMMA pipeline.
+    if _generator is not None and _semantic is not None:
+        _generator.module.set_attr(
+            _WGMMA_PIPELINE_MODE_ATTR,
+            _semantic.builder.get_string_attr(_WGMMA_PIPELINE_MODE_USER_PROMISE),
+        )
+
+    if acc is None and isinstance(pendings, tl.tensor):
+        acc = pendings
+        pendings = 0
+    pendings = _require_wgmma_int(pendings, "pendings")
+    if pendings < 0:
+        raise ValueError("wgmma_wait pendings must be non-negative")
+    if not isinstance(acc, tl.tensor):
+        raise ValueError(f"wgmma_wait acc must be a tl.tensor, got {type(acc).__name__}")
+    result = _semantic.builder.create_tle_wgmma_wait(acc.handle, pendings)
+    return tensor(result, acc.type)
+
+
+@tl.builtin
+def async_dot_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
+    """Backward-compatible async-dot wait alias that does not select user-promise routing."""
     if acc is None and isinstance(pendings, tl.tensor):
         acc = pendings
         pendings = 0
@@ -840,7 +897,6 @@ def wgmma_wait(pendings, acc=None, _semantic=None) -> tl.tensor:
 
 # Names used by the TLX API design notes.
 async_dot = wgmma
-async_dot_wait = wgmma_wait
 
 
 class CopyDirection(Enum):

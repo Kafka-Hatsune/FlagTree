@@ -22,10 +22,7 @@ def TritonGPUPipeline : Pass<"tritongpu-pipeline", "mlir::ModuleOp"> {
            "number of pipeline stages">,
     Option<"dumpIntermediateSteps", "dump-intermediate-steps",
            "bool", /*default*/"false",
-           "Dump intermediate steps">,
-    Option<"tleWgmmaPipelineMode", "tle-wgmma-pipeline-mode",
-           "std::string", /*default*/"\"compiler_auto\"",
-           "TLE WGMMA pipeline mode: compiler_auto or user_promise">
+           "Dump intermediate steps">
   ];
 }
 

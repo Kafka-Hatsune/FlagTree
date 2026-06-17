@@ -67,14 +67,12 @@ void init_triton_passes_ttgpuir(py::module &&m) {
                             createTritonGPUAssignLatencies, int);
   ADD_PASS_WRAPPER_0("add_schedule_loops", createTritonGPUScheduleLoops);
   m.def("add_pipeline",
-        [](mlir::PassManager &pm, int numStages, bool dumpIntermediateSteps,
-           const std::string &tleWgmmaPipelineMode) {
-          pm.addPass(createTritonGPUPipeline(
-              {numStages, dumpIntermediateSteps, tleWgmmaPipelineMode}));
+        [](mlir::PassManager &pm, int numStages, bool dumpIntermediateSteps) {
+          pm.addPass(
+              createTritonGPUPipeline({numStages, dumpIntermediateSteps}));
         },
         py::arg("pm"), py::arg("num_stages"),
-        py::arg("dump_intermediate_steps"),
-        py::arg("tle_wgmma_pipeline_mode") = "compiler_auto");
+        py::arg("dump_intermediate_steps"));
   ADD_PASS_OPTION_WRAPPER_1("add_warp_specialize",
                             createTritonGPUAutomaticWarpSpecialization, int);
   ADD_PASS_WRAPPER_0("add_prefetch", createTritonGPUPrefetch);

@@ -132,7 +132,6 @@ class CUDAOptions:
     sanitize_overflow: bool = True
     arch: str = None
     instrumentation_mode: str = ""
-    tle_wgmma_pipeline_mode: str = "compiler_auto"
 
     def __post_init__(self):
         default_libdir = Path(__file__).parent / 'lib'
@@ -192,18 +191,6 @@ class CUDABackend(BaseBackend):
             raise ValueError(f"cluster_dims values must be positive ints, got {cluster_dims!r}")
         cluster_dims = tuple(cluster_dims)
         args["cluster_dims"] = cluster_dims
-        tle_wgmma_pipeline_mode = args.get(
-            "tle_wgmma_pipeline_mode",
-            os.environ.get("TLE_WGMMA_PIPELINE_MODE", "compiler_auto"),
-        )
-        tle_wgmma_pipeline_mode = str(tle_wgmma_pipeline_mode)
-        if tle_wgmma_pipeline_mode not in ("compiler_auto", "user_promise"):
-            raise ValueError(
-                "TLE_WGMMA_PIPELINE_MODE must be 'compiler_auto' or "
-                "'user_promise', "
-                f"got {tle_wgmma_pipeline_mode!r}"
-            )
-        args["tle_wgmma_pipeline_mode"] = tle_wgmma_pipeline_mode
         # end flagtree tle
 
         if args.get("num_ctas", 1) > 1 and capability < 90:
@@ -342,8 +329,7 @@ class CUDABackend(BaseBackend):
             passes.ttgpuir.add_schedule_loops(pm)
             tle.passes.add_tile_style_pipeline_schedule(pm)
             tle.passes.add_materialize_tile_style_pipeline(pm)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled,
-                                         opt.tle_wgmma_pipeline_mode)
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
         elif capability // 10 >= 10:
             passes.ttgpuir.add_fuse_nested_loops(pm)
             passes.common.add_canonicalizer(pm)
@@ -355,8 +341,7 @@ class CUDABackend(BaseBackend):
             passes.ttgpuir.add_assign_latencies(pm, opt.num_stages)
             passes.ttgpuir.add_schedule_loops(pm)
             passes.ttgpuir.add_warp_specialize(pm, opt.num_stages)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled,
-                                         opt.tle_wgmma_pipeline_mode)
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
             passes.ttgpuir.add_optimize_partition_warps(pm)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
             # hoist again and allow hoisting out of if statements

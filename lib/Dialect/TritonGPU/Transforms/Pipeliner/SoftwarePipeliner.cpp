@@ -37,13 +37,24 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUPIPELINE
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages,
-                                   StringRef tleWgmmaPipelineMode) {
-  if (tleWgmmaPipelineMode != "compiler_auto" &&
-      tleWgmmaPipelineMode != "user_promise") {
-    moduleOp.emitError("TLE WGMMA pipeline mode must be 'compiler_auto' or "
-                       "'user_promise', got '")
-        << tleWgmmaPipelineMode << "'";
+static constexpr llvm::StringLiteral kTleWgmmaPipelineModeAttr(
+    "tle.wgmma_pipeline_mode");
+static constexpr llvm::StringLiteral kTleWgmmaCompilerAutoMode(
+    "compiler_auto");
+static constexpr llvm::StringLiteral kTleWgmmaUserPromiseMode("user_promise");
+
+static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
+  StringRef mode = kTleWgmmaCompilerAutoMode;
+  if (auto attr =
+          moduleOp->getAttrOfType<StringAttr>(kTleWgmmaPipelineModeAttr))
+    mode = attr.getValue();
+
+  if (mode != kTleWgmmaCompilerAutoMode &&
+      mode != kTleWgmmaUserPromiseMode) {
+    moduleOp.emitError("TLE WGMMA pipeline mode module attribute '")
+        << kTleWgmmaPipelineModeAttr << "' must be '"
+        << kTleWgmmaCompilerAutoMode << "' or '" << kTleWgmmaUserPromiseMode
+        << "', got '" << mode << "'";
     return failure();
   }
 
@@ -54,7 +65,7 @@ static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages,
     if (getNumStagesOrDefault(forOp, numStages) < 1)
       continue;
 #ifdef __TLE__
-    if (tleWgmmaPipelineMode == "compiler_auto")
+    if (mode == kTleWgmmaCompilerAutoMode)
       mlir::triton::gpu::detail::scheduleTleWgmmaCompilerAutoPipeline(forOp);
     else
       mlir::triton::gpu::detail::scheduleTleWgmmaUserPromisePipeline(forOp);
@@ -215,7 +226,7 @@ struct PipelinePass : public impl::TritonGPUPipelineBase<PipelinePass> {
     // Cleanup the IR from the pipeline attributes.
     removePipeliningAttributes(moduleOp);
 
-    if (failed(pipelineWgmma(moduleOp, numStages, tleWgmmaPipelineMode)))
+    if (failed(pipelineWgmma(moduleOp, numStages)))
       return signalPassFailure();
 
     // schedule the waits
