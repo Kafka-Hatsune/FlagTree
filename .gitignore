@@ -115,14 +115,3 @@ AGENTS.md
 
 # MTHREADS LOCAL BINARY
 third_party/mthreads/backend/bin/
-*.csv
-*.json
-mlir_dump
-res_record
-documents
-*.png
-*.log
-*.sh
-*.tgz
-*.tar.gz
-scripts
