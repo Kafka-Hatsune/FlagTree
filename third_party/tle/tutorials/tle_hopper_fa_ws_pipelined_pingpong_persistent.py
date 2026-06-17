@@ -341,6 +341,8 @@ def tle_attention(
     num_mma_groups: int = 2,
     producer_num_warps: int = 4,
     return_kernel: bool = False,
+    out: torch.Tensor | None = None,
+    m_out: torch.Tensor | None = None,
 ):
     assert q.is_cuda and k.is_cuda and v.is_cuda
     assert q.dtype == torch.float16 and k.dtype == torch.float16 and v.dtype == torch.float16
@@ -359,8 +361,20 @@ def tle_attention(
 
     triton.set_allocator(alloc_fn)
 
-    o = torch.empty_like(q)
-    m = torch.empty((z, h, n_ctx), device=q.device, dtype=torch.float32)
+    if out is None:
+        o = torch.empty_like(q)
+    else:
+        assert out.shape == q.shape
+        assert out.device == q.device and out.dtype == q.dtype
+        assert out.is_contiguous()
+        o = out
+    if m_out is None:
+        m = torch.empty((z, h, n_ctx), device=q.device, dtype=torch.float32)
+    else:
+        assert m_out.shape == (z, h, n_ctx)
+        assert m_out.device == q.device and m_out.dtype == torch.float32
+        assert m_out.is_contiguous()
+        m = m_out
     y_dim = z * h * n_ctx
     block_m_split = block_m // num_mma_groups
 
@@ -426,8 +440,11 @@ def sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sm_scale: 
     )
 
 
-def bench_ms(fn: Callable[[], object], warmup: int, rep: int) -> tuple[float, float, float]:
-    result = triton.testing.do_bench(fn, warmup=warmup, rep=rep, quantiles=(0.5, 0.2, 0.8))
+def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *, cuda_graph: bool = False) -> tuple[float, float, float]:
+    if cuda_graph:
+        result = triton.testing.do_bench_cudagraph(fn, rep=rep, quantiles=(0.5, 0.2, 0.8))
+    else:
+        result = triton.testing.do_bench(fn, warmup=warmup, rep=rep, quantiles=(0.5, 0.2, 0.8))
     if isinstance(result, (tuple, list)):
         return float(result[0]), float(result[1]), float(result[2])
     ms = float(result)
@@ -462,6 +479,7 @@ def make_row(
     block_m: int,
     block_n: int,
     extra: dict[str, object] | None = None,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "variant": variant,
@@ -471,6 +489,7 @@ def make_row(
         "HEAD_DIM": problem.head_dim,
         "BLOCK_M": block_m,
         "BLOCK_N": block_n,
+        "cuda_graph": cuda_graph,
         "ms": f"{ms:.6f}",
         "p20_ms": f"{p20:.6f}",
         "p80_ms": f"{p80:.6f}",
@@ -532,6 +551,8 @@ def main() -> None:
     parser.add_argument("--block-n", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
+    parser.add_argument("--cuda-graph", action="store_true",
+                        help="benchmark by capturing the workload once and timing CUDA Graph replay")
     parser.add_argument("--out", default=None)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--include-sdpa", action="store_true",
@@ -567,7 +588,7 @@ def main() -> None:
             def run_sdpa():
                 sdpa_attention(q, k, v, sm_scale)
 
-            ms, p20, p80 = bench_ms(run_sdpa, args.warmup, args.rep)
+            ms, p20, p80 = bench_ms(run_sdpa, args.warmup, args.rep, cuda_graph=args.cuda_graph)
             rows.append(make_row(
                 "SDPA",
                 problem,
@@ -584,6 +605,7 @@ def main() -> None:
                     "requires_grad": args.sdpa_requires_grad,
                     "status": "ok",
                 },
+                cuda_graph=args.cuda_graph,
             ))
 
         try:
@@ -602,10 +624,22 @@ def main() -> None:
                 ref = reference_attention(q, k, v, sm_scale)
                 torch.testing.assert_close(o, ref, atol=5e-2, rtol=5e-2)
 
-            def run():
-                tle_attention(q, k, v, sm_scale, block_m=args.block_m, block_n=args.block_n)
+            bench_o = torch.empty_like(q)
+            bench_m = torch.empty((problem.z, problem.h, problem.n_ctx), device=q.device, dtype=torch.float32)
 
-            ms, p20, p80 = bench_ms(run, args.warmup, args.rep)
+            def run():
+                tle_attention(
+                    q,
+                    k,
+                    v,
+                    sm_scale,
+                    block_m=args.block_m,
+                    block_n=args.block_n,
+                    out=bench_o,
+                    m_out=bench_m,
+                )
+
+            ms, p20, p80 = bench_ms(run, args.warmup, args.rep, cuda_graph=args.cuda_graph)
             extra = {
                 "output_dtype": str(o.dtype).replace("torch.", ""),
                 "has_warp_specialize": "ttg.warp_specialize" in kernel.asm["ttgir"],
@@ -624,6 +658,7 @@ def main() -> None:
                 args.block_m,
                 args.block_n,
                 extra,
+                cuda_graph=args.cuda_graph,
             ))
         except Exception as exc:
             if not args.continue_on_tle_error:

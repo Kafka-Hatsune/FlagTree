@@ -13,6 +13,7 @@ python "${PARENT_DIR}/tle_hopper_gemm_ws_persistent.py" \
   --bm 128 \
   --bn 128 \
   --bk 64 \
+  --cuda-graph \
   --out "${SCRIPT_DIR}/tle_gemm_user_promise_benchmark.csv" \
   --shape 2048x2048x2048 \
   --shape 4096x4096x4096 \

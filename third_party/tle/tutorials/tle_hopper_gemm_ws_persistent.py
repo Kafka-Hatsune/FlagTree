@@ -376,6 +376,7 @@ def tle_ws_persistent_matmul(
     num_stages: int = 3,
     wgmma_pipeline: bool = True,
     producer_num_warps: int = 4,
+    out: torch.Tensor | None = None,
 ):
     assert a.is_cuda and b.is_cuda
     assert a.dtype == torch.float16 and b.dtype == torch.float16
@@ -389,7 +390,13 @@ def tle_ws_persistent_matmul(
 
     m, k = a.shape
     _, n = b.shape
-    c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    if out is None:
+        c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    else:
+        assert out.shape == (m, n)
+        assert out.device == a.device and out.dtype == torch.float16
+        assert out.is_contiguous()
+        c = out
 
     a_desc = TensorDescriptor.from_tensor(a, block_shape=[bm // 2, bk])
     b_desc = TensorDescriptor.from_tensor(b, block_shape=[bk, bn])
@@ -431,6 +438,7 @@ def tle_ws_nonpersistent_matmul(
     num_stages: int = 3,
     wgmma_pipeline: bool = True,
     producer_num_warps: int = 4,
+    out: torch.Tensor | None = None,
 ):
     assert a.is_cuda and b.is_cuda
     assert a.dtype == torch.float16 and b.dtype == torch.float16
@@ -446,7 +454,13 @@ def tle_ws_nonpersistent_matmul(
     _, n = b.shape
     if m % bm != 0 or n % bn != 0 or k % bk != 0:
         raise ValueError("non-persistent TLE benchmark currently expects M, N, K to be exact tile multiples")
-    c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    if out is None:
+        c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    else:
+        assert out.shape == (m, n)
+        assert out.device == a.device and out.dtype == torch.float16
+        assert out.is_contiguous()
+        c = out
 
     a_desc = TensorDescriptor.from_tensor(a, block_shape=[bm // 2, bk])
     b_desc = TensorDescriptor.from_tensor(b, block_shape=[bk, bn])
@@ -559,8 +573,11 @@ def default_compare_configs(args: argparse.Namespace) -> list[GemmConfig]:
     return unique
 
 
-def bench_ms(fn: Callable[[], object], warmup: int, rep: int) -> tuple[float, float, float]:
-    result = triton.testing.do_bench(fn, warmup=warmup, rep=rep, quantiles=(0.5, 0.2, 0.8))
+def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *, cuda_graph: bool = False) -> tuple[float, float, float]:
+    if cuda_graph:
+        result = triton.testing.do_bench_cudagraph(fn, rep=rep, quantiles=(0.5, 0.2, 0.8))
+    else:
+        result = triton.testing.do_bench(fn, warmup=warmup, rep=rep, quantiles=(0.5, 0.2, 0.8))
     if not isinstance(result, (tuple, list)):
         ms = float(result)
         return ms, ms, ms
@@ -583,6 +600,7 @@ def make_row(
     *,
     has_warp_specialize: bool | None = None,
     has_wgmma: bool | None = None,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "variant": variant,
@@ -597,6 +615,7 @@ def make_row(
         "PRODUCER_NUM_WARPS": producer_num_warps,
         "wgmma_pipeline": wgmma_pipeline,
         "producer_num_warps": producer_num_warps,
+        "cuda_graph": cuda_graph,
         "ms": f"{ms:.6f}",
         "p20_ms": f"{p20:.6f}",
         "p80_ms": f"{p80:.6f}",
@@ -617,12 +636,14 @@ def make_baseline_row(
     p80: float,
     *,
     baseline_source: str | None = None,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "variant": variant,
         "M": problem.m,
         "N": problem.n,
         "K": problem.k,
+        "cuda_graph": cuda_graph,
         "ms": f"{ms:.6f}",
         "p20_ms": f"{p20:.6f}",
         "p80_ms": f"{p80:.6f}",
@@ -660,6 +681,7 @@ def make_native_row(
     *,
     has_warp_specialize: bool,
     has_wgmma: bool,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
     return {
         "variant": variant,
@@ -671,6 +693,7 @@ def make_native_row(
         "p80_ms": f"{p80:.6f}",
         "tflops": f"{problem.flops / (ms * 1e-3) / 1e12:.3f}",
         **cfg,
+        "cuda_graph": cuda_graph,
         "has_warp_specialize": has_warp_specialize,
         "has_wgmma": has_wgmma,
     }
@@ -685,8 +708,9 @@ def run_torch_matmul_baseline(
     rep: int,
     *,
     use_out: bool,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
-    if use_out:
+    if use_out or cuda_graph:
         c = torch.empty((problem.m, problem.n), device=a.device, dtype=torch.float16)
 
         def run():
@@ -695,9 +719,9 @@ def run_torch_matmul_baseline(
         def run():
             torch.matmul(a, b)
 
-    ms, p20, p80 = bench_ms(run, warmup, rep)
+    ms, p20, p80 = bench_ms(run, warmup, rep, cuda_graph=cuda_graph)
     baseline_source = "tlx.torch.matmul" if variant == "cuBLAS" else None
-    return make_baseline_row(variant, problem, ms, p20, p80, baseline_source=baseline_source)
+    return make_baseline_row(variant, problem, ms, p20, p80, baseline_source=baseline_source, cuda_graph=cuda_graph)
 
 
 def add_cublas_speedups(rows: list[dict[str, object]]) -> None:
@@ -755,6 +779,7 @@ def run_tle_compare_variant(
     *,
     persistent: bool,
     dump_summary: bool,
+    cuda_graph: bool = False,
 ) -> dict[str, object]:
     split = "persistent_split_m" if persistent else "nonpersistent_split_m"
     variant = f"flagtree.tle.async_tasks.{split}.{cfg.label()}"
@@ -785,6 +810,8 @@ def run_tle_compare_variant(
                 file=sys.stderr,
             )
 
+        bench_out = torch.empty((problem.m, problem.n), device=a.device, dtype=torch.float16)
+
         def run():
             matmul_fn(
                 a,
@@ -796,9 +823,10 @@ def run_tle_compare_variant(
                 num_stages=cfg.num_stages,
                 wgmma_pipeline=cfg.wgmma_pipeline,
                 producer_num_warps=cfg.producer_num_warps,
+                out=bench_out,
             )[0]
 
-        ms, p20, p80 = bench_ms(run, warmup, rep)
+        ms, p20, p80 = bench_ms(run, warmup, rep, cuda_graph=cuda_graph)
         return make_row(
             variant,
             problem,
@@ -814,6 +842,7 @@ def run_tle_compare_variant(
             cfg.producer_num_warps,
             has_warp_specialize=has_warp_specialize,
             has_wgmma=has_wgmma,
+            cuda_graph=cuda_graph,
         )
     except Exception as exc:
         return make_error_row(
@@ -824,7 +853,7 @@ def run_tle_compare_variant(
         )
 
 
-def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int) -> list[dict[str, object]]:
+def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_graph: bool = False) -> list[dict[str, object]]:
     repo_root = find_flagtree_repo_root()
     if repo_root is None:
         return [
@@ -902,7 +931,7 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int) -> list[
             def run():
                 launch()
 
-            ms, p20, p80 = bench_ms(run, warmup, rep)
+            ms, p20, p80 = bench_ms(run, warmup, rep, cuda_graph=cuda_graph)
             rows.append(
                 make_native_row(
                     "flagtree.native_tl_range_ws_tma",
@@ -913,6 +942,7 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int) -> list[
                     cfg,
                     has_warp_specialize="ttg.warp_specialize" in ttgir,
                     has_wgmma="ttng.warp_group_dot" in ttgir,
+                    cuda_graph=cuda_graph,
                 )
             )
         except Exception as exc:
@@ -945,6 +975,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     args.warmup,
                     args.rep,
                     use_out=False,
+                    cuda_graph=args.cuda_graph,
                 )
             )
         if args.include_torch:
@@ -957,6 +988,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     args.warmup,
                     args.rep,
                     use_out=True,
+                    cuda_graph=args.cuda_graph,
                 )
             )
 
@@ -973,6 +1005,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     cfg,
                     persistent=True,
                     dump_summary=args.dump_summary,
+                    cuda_graph=args.cuda_graph,
                 )
             )
         if not args.no_nonpersistent:
@@ -988,11 +1021,12 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                         cfg,
                         persistent=False,
                         dump_summary=args.dump_summary,
+                        cuda_graph=args.cuda_graph,
                     )
                 )
 
         if not args.no_native:
-            problem_rows.extend(run_native_ws_tma_variants(problem, args.warmup, args.rep))
+            problem_rows.extend(run_native_ws_tma_variants(problem, args.warmup, args.rep, cuda_graph=args.cuda_graph))
 
         if not args.no_cublas:
             add_cublas_speedups(problem_rows)
@@ -1022,6 +1056,8 @@ def main() -> None:
     parser.add_argument("--shape", action="append", type=parse_problem, default=[])
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
+    parser.add_argument("--cuda-graph", action="store_true",
+                        help="benchmark by capturing the workload once and timing CUDA Graph replay")
     parser.add_argument("--out", default=None)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--compare", action="store_true",
@@ -1074,6 +1110,7 @@ def main() -> None:
                     args.warmup,
                     args.rep,
                     use_out=False,
+                    cuda_graph=args.cuda_graph,
                 )
             )
         if args.include_torch:
@@ -1086,6 +1123,7 @@ def main() -> None:
                     args.warmup,
                     args.rep,
                     use_out=True,
+                    cuda_graph=args.cuda_graph,
                 )
             )
 
@@ -1121,6 +1159,8 @@ def main() -> None:
         if args.check:
             torch.testing.assert_close(c, torch.matmul(a, b), atol=2e-2, rtol=2e-2)
 
+        bench_out = torch.empty((problem.m, problem.n), device=a.device, dtype=torch.float16)
+
         def run():
             matmul_fn(
                 a,
@@ -1132,9 +1172,10 @@ def main() -> None:
                 num_stages=args.num_stages,
                 wgmma_pipeline=wgmma_pipeline,
                 producer_num_warps=args.producer_num_warps,
+                out=bench_out,
             )[0]
 
-        ms, p20, p80 = bench_ms(run, args.warmup, args.rep)
+        ms, p20, p80 = bench_ms(run, args.warmup, args.rep, cuda_graph=args.cuda_graph)
         variant = "flagtree.tle.async_tasks.nonpersistent_split_m" if args.non_persistent else \
             "flagtree.tle.async_tasks.persistent_split_m"
         problem_rows.append(
@@ -1153,6 +1194,7 @@ def main() -> None:
                 args.producer_num_warps,
                 has_warp_specialize=has_warp_specialize,
                 has_wgmma=has_wgmma,
+                cuda_graph=args.cuda_graph,
             )
         )
         if args.compare or args.include_cublas:
