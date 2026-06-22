@@ -21,12 +21,17 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 
-def _has_hopper_gpu() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
+def _is_nvidia_backend() -> bool:
+    target = triton.runtime.driver.active.get_current_target()
+    return target.backend == "cuda"
+
+
+def _has_nvidia_hopper_gpu() -> bool:
+    return _is_nvidia_backend() and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
 
 
 pytestmark = pytest.mark.skipif(
-    not _has_hopper_gpu(),
+    not _has_nvidia_hopper_gpu(),
     reason="warp-specialized TMA WGMMA GEMM requires NVIDIA Hopper (sm90+)",
 )
 

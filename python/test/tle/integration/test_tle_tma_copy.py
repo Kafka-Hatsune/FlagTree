@@ -21,6 +21,11 @@ def _is_enflame_backend():
     return target.backend == "gcu"
 
 
+def _is_nvidia_backend():
+    target = triton.runtime.driver.active.get_current_target()
+    return target.backend == "cuda"
+
+
 def _has_hopper_gpu() -> bool:
     if _is_enflame_backend():
         # Assume Enflame backend has Hopper support for testing purposes
@@ -171,6 +176,7 @@ class TestTLETmaCopy:
         expected = a + b
         torch.testing.assert_close(c, expected, atol=1e-5, rtol=1e-5)
 
+    @pytest.mark.skipif(not _is_nvidia_backend(), reason="Explicit TMA completion barriers require NVIDIA backend")
     def test_tma_copy_explicit_barrier(self):
         """Test TMA load with user-provided completion barriers."""
         torch.manual_seed(43)
