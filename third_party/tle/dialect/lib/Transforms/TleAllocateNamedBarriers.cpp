@@ -19,6 +19,17 @@ namespace ttng = mlir::triton::nvidia_gpu;
 #define GEN_PASS_DEF_TRITONTLEALLOCATENAMEDBARRIERS
 #include "tle/dialect/include/Transforms/Passes.h.inc"
 
+#if defined(__HCU__)
+namespace {
+
+struct TritonTleAllocateNamedBarriers
+    : public impl::TritonTleAllocateNamedBarriersBase<
+          TritonTleAllocateNamedBarriers> {
+  void runOnOperation() override {}
+};
+
+} // namespace
+#else
 namespace {
 
 constexpr int64_t kFirstVirtualNamedBarrierId = 16;
@@ -186,5 +197,6 @@ struct TritonTleAllocateNamedBarriers
 };
 
 } // namespace
+#endif
 
 } // namespace mlir::triton::tle

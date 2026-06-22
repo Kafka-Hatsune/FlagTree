@@ -156,6 +156,7 @@ public:
                                          srcType.getBlockType().getEncoding(),
                                          op.getIndices());
 
+#if !defined(__HCU__)
       if (Value userBarrier = op.getBarrier()) {
         auto expectBytes =
             op->getAttrOfType<IntegerAttr>(op.getExpectBytesAttrName());
@@ -171,6 +172,7 @@ public:
         if (op->hasAttr(op.getExpectBytesAttrName()))
           return op.emitOpError("expect_bytes requires an explicit completion "
                                 "barrier");
+#endif
 
         // Create minimal mbarrier allocation with #shared2 encoding (similar to
         // our current implementation)
@@ -208,12 +210,16 @@ public:
         Value phase = rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
         rewriter.create<WaitBarrierOp>(loc, mbarrierAlloc, phase);
         rewriter.create<InvalBarrierOp>(loc, mbarrierAlloc);
+#if !defined(__HCU__)
       }
+#endif
 
     } else {
+#if !defined(__HCU__)
       if (op.getBarrier())
         return op.emitOpError(
             "barrier is only supported for global-to-shared TMA copy");
+#endif
 
       // Store from shared memory to global memory
       auto dstType = cast<TensorDescType>(op.getDst().getType());

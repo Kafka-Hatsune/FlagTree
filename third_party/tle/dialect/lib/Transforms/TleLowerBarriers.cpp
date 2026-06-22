@@ -39,6 +39,7 @@ static Value createBarrierSlot(OpBuilder &builder, Location loc, Value array,
   return builder.create<ttg::MemDescIndexOp>(loc, slotTy, array, idx);
 }
 
+#if !defined(__HCU__)
 static std::pair<Value, Value> createNamedBarrierOperands(OpBuilder &builder,
                                                          Location loc,
                                                          Operation *op) {
@@ -48,6 +49,7 @@ static std::pair<Value, Value> createNamedBarrierOperands(OpBuilder &builder,
       loc, getI32Attr(op, "named_num_threads"), 32);
   return {id, threads};
 }
+#endif
 
 struct TritonTleLowerBarriers
     : public impl::TritonTleLowerBarriersBase<TritonTleLowerBarriers> {
@@ -75,9 +77,16 @@ struct TritonTleLowerBarriers
         builder.create<ttng::WaitBarrierOp>(loc, op.getBarrier(),
                                             op.getPhase());
       } else {
+#if defined(__HCU__)
+        op.emitOpError("named barrier lowering is only supported on NVIDIA "
+                       "backend");
+        signalPassFailure();
+        return;
+#else
         auto [id, threads] =
             createNamedBarrierOperands(builder, loc, op.getOperation());
         builder.create<ttng::NamedBarrierWaitOp>(loc, id, threads);
+#endif
       }
       op.erase();
     }
@@ -92,9 +101,16 @@ struct TritonTleLowerBarriers
         builder.create<ttng::ArriveBarrierOp>(loc, op.getBarrier(),
                                               static_cast<uint32_t>(count));
       } else {
+#if defined(__HCU__)
+        op.emitOpError("named barrier lowering is only supported on NVIDIA "
+                       "backend");
+        signalPassFailure();
+        return;
+#else
         auto [id, threads] =
             createNamedBarrierOperands(builder, loc, op.getOperation());
         builder.create<ttng::NamedBarrierArriveOp>(loc, id, threads);
+#endif
       }
       op.erase();
     }

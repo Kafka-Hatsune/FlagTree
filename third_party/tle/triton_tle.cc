@@ -209,14 +209,24 @@ void init_triton_tle_ir(py::module &&m) {
       .def("create_tma_copy",
            [](TritonOpBuilder &self, Value src, Value dst,
               std::vector<Value> &indices) {
+#ifdef __HCU__
+             self.create<ttg::TMACopyOp>(src, dst, indices);
+#else
              self.create<ttg::TMACopyOp>(src, dst, indices, Value(),
                                          IntegerAttr());
+#endif
              return;
            })
       .def("create_tma_copy",
            [](TritonOpBuilder &self, Value src, Value dst,
               std::vector<Value> &indices, py::object barrier,
               int32_t expectBytes) {
+#ifdef __HCU__
+             if (!barrier.is_none() || expectBytes > 0)
+               throw py::value_error(
+                   "TMA completion barrier is only supported on NVIDIA backend");
+             self.create<ttg::TMACopyOp>(src, dst, indices);
+#else
              auto &builder = self.getBuilder();
              Value barrierValue;
              if (!barrier.is_none())
@@ -226,6 +236,7 @@ void init_triton_tle_ir(py::module &&m) {
                expectBytesAttr = builder.getI32IntegerAttr(expectBytes);
              self.create<ttg::TMACopyOp>(src, dst, indices, barrierValue,
                                          expectBytesAttr);
+#endif
              return;
            })
       .def("create_local_load",
