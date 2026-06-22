@@ -1,5 +1,5 @@
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "tle/dialect/include/IR/Dialect.h"
@@ -91,10 +91,10 @@ static RankedTensorType getMMAType(WGMMAOp op) {
   SmallVector<unsigned, 2> CTAsPerCGA = {1, 1};
   SmallVector<unsigned, 2> CTASplitNum = {1, 1};
   SmallVector<unsigned, 2> CTAOrder = {1, 0};
-  auto CTALayout = ttg::CTAEncodingAttr::fromSplitParams(
-      context, CTAsPerCGA, CTASplitNum, CTAOrder);
-  auto mmaEncoding = ttg::NvidiaMmaEncodingAttr::get(
-      context, 3, 0, warpsPerCTA, CTALayout, instrShape);
+  auto CTALayout = ttg::CTAEncodingAttr::fromSplitParams(context, CTAsPerCGA,
+                                                         CTASplitNum, CTAOrder);
+  auto mmaEncoding = ttg::NvidiaMmaEncodingAttr::get(context, 3, 0, warpsPerCTA,
+                                                     CTALayout, instrShape);
   return RankedTensorType::get(accType.getShape(), accType.getElementType(),
                                mmaEncoding);
 }
@@ -127,8 +127,8 @@ static void convertLoopCarriedAccumulator(OpOperand &use, Value encodedInit,
   Type encodedType = encodedInit.getType();
   forOp->setOperand(use.getOperandNumber(), encodedInit);
 
-  BlockArgument regionArg = forOp.getBody()->getArgument(
-      forOp.getNumInductionVars() + initIndex);
+  BlockArgument regionArg =
+      forOp.getBody()->getArgument(forOp.getNumInductionVars() + initIndex);
   regionArg.setType(encodedType);
   forOp.getResult(initIndex).setType(encodedType);
 
@@ -209,8 +209,8 @@ struct TritonTleLowerWGMMAPass
           }
           auto nativeDot = ttng::WarpGroupDotOp::create(
               builder, wgmma.getLoc(), acc.getType(), a, wgmma.getB(), acc,
-              Value(), wgmma.getInputPrecision(),
-              wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
+              Value(), wgmma.getInputPrecision(), wgmma.getMaxNumImpreciseAcc(),
+              wgmma.getIsAsync());
           encodedAccs[wgmma.getD()] = nativeDot.getD();
           for (OpOperand &use :
                llvm::make_early_inc_range(wgmma.getD().getUses()))

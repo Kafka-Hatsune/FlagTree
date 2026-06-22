@@ -20,7 +20,6 @@ SHARED_MEMORY_ADDRESS_SPACE = 3
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
 
-
 _async_task_state = threading.local()
 
 
@@ -707,12 +706,11 @@ def _canonicalize_wgmma_operands(a, b, trans_a: bool, trans_b: bool, _semantic):
 
     if not any(isinstance(a, a_ty) and isinstance(b, b_ty) for a_ty, b_ty in _WGMMA_ALLOWED_OPERAND_TYPE_PAIRS):
         if isinstance(b, tl.tensor):
-            raise ValueError("wgmma b currently supports only shared-memory buffered_tensor operands; tensor B is unsupported")
-        raise ValueError(
-            "wgmma operands must be one of: "
-            "(shared-memory buffered_tensor, shared-memory buffered_tensor) or "
-            "(tl.tensor, shared-memory buffered_tensor)"
-        )
+            raise ValueError(
+                "wgmma b currently supports only shared-memory buffered_tensor operands; tensor B is unsupported")
+        raise ValueError("wgmma operands must be one of: "
+                         "(shared-memory buffered_tensor, shared-memory buffered_tensor) or "
+                         "(tl.tensor, shared-memory buffered_tensor)")
 
     if isinstance(a, tle.buffered_tensor):
         a = _require_wgmma_smem_operand(a, "wgmma a")
@@ -858,6 +856,7 @@ def wgmma_wait(pendings, acc=None, _semantic=None, _generator=None) -> tl.tensor
         raise ValueError(f"wgmma_wait acc must be a tl.tensor, got {type(acc).__name__}")
     result = _semantic.builder.create_tle_wgmma_wait(acc.handle, pendings)
     return tensor(result, acc.type)
+
 
 class CopyDirection(Enum):
     """Copy direction enum for data transfer operations"""

@@ -2,12 +2,12 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/SmallBitVector.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include <algorithm>
 #include <optional>
 
@@ -71,11 +71,11 @@ static void reserveWarpSpecializeBarrierIds(triton::FuncOp func,
   }
 }
 
-static LogicalResult collectNamedBarrierId(Operation *op, Value idValue,
-                                           llvm::SmallBitVector &reserved,
-                                           llvm::SmallBitVector &used,
-                                           llvm::MapVector<int64_t, int64_t>
-                                               &virtualToPhysical) {
+static LogicalResult
+collectNamedBarrierId(Operation *op, Value idValue,
+                      llvm::SmallBitVector &reserved,
+                      llvm::SmallBitVector &used,
+                      llvm::MapVector<int64_t, int64_t> &virtualToPhysical) {
   std::optional<int64_t> id = getConstantI32(idValue);
   if (!id)
     return op->emitOpError("requires a constant named barrier id before "
@@ -128,9 +128,9 @@ allocateVirtualIds(triton::FuncOp func, llvm::SmallBitVector &reserved,
   return success();
 }
 
-static void rewriteNamedBarrierId(Operation *op, Value idValue,
-                                  const llvm::MapVector<int64_t, int64_t>
-                                      &virtualToPhysical) {
+static void rewriteNamedBarrierId(
+    Operation *op, Value idValue,
+    const llvm::MapVector<int64_t, int64_t> &virtualToPhysical) {
   std::optional<int64_t> id = getConstantI32(idValue);
   if (!id || *id < kFirstVirtualNamedBarrierId)
     return;

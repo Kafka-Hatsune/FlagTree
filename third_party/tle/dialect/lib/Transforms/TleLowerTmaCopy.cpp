@@ -164,8 +164,7 @@ public:
           return op.emitOpError("with explicit completion barrier requires "
                                 "positive expect_bytes");
         rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(
-            loc, userBarrier, static_cast<int32_t>(expectBytes.getInt()),
-            pred);
+            loc, userBarrier, static_cast<int32_t>(expectBytes.getInt()), pred);
         rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
             op.getLoc(), op.getSrc(), indices, userBarrier, dstMemDesc, pred);
       } else {
@@ -194,17 +193,16 @@ public:
         // Calculate size in bytes
         auto encoding = getEncodingFromDescriptor(op, tensorType, op.getSrc());
         auto shapePerCTA = getShapePerCTA(encoding, tensorType.getShape());
-        int sizeInBytes =
-            product(shapePerCTA) *
-            tensorType.getElementType().getIntOrFloatBitWidth() / 8;
+        int sizeInBytes = product(shapePerCTA) *
+                          tensorType.getElementType().getIntOrFloatBitWidth() /
+                          8;
 
-        rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(
-            loc, mbarrierAlloc, sizeInBytes, pred);
+        rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, mbarrierAlloc,
+                                                             sizeInBytes, pred);
 
         // Perform async TMA copy from global to existing shared memory
         rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
-            op.getLoc(), op.getSrc(), indices, mbarrierAlloc, dstMemDesc,
-            pred);
+            op.getLoc(), op.getSrc(), indices, mbarrierAlloc, dstMemDesc, pred);
 
         // Wait for completion and invalidate barrier
         Value phase = rewriter.create<arith::ConstantIntOp>(loc, 0, 32);

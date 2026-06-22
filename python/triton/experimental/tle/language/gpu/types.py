@@ -457,8 +457,7 @@ class barrier(tl.base_value):
         self.allocation_key = allocation_key
         self.shape = list(shape if shape is not None else [num_barriers, 1])
         self.type = barrier_type(num_barriers, arrive_count, init, expect_bytes, layout, semantic, shape=self.shape,
-                                 static_index=static_index, named_base_id=named_base_id,
-                                 allocation_key=allocation_key)
+                                 static_index=static_index, named_base_id=named_base_id, allocation_key=allocation_key)
 
     @property
     def is_slot(self) -> bool:

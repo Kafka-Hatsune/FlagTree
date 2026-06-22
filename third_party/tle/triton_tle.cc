@@ -217,15 +217,16 @@ void init_triton_tle_ir(py::module &&m) {
 #endif
              return;
            })
-      .def("create_tma_copy",
-           [](TritonOpBuilder &self, Value src, Value dst,
-              std::vector<Value> &indices, py::object barrier,
-              int32_t expectBytes) {
+      .def(
+          "create_tma_copy",
+          [](TritonOpBuilder &self, Value src, Value dst,
+             std::vector<Value> &indices, py::object barrier,
+             int32_t expectBytes) {
 #ifdef __HCU__
-             if (!barrier.is_none() || expectBytes > 0)
-               throw py::value_error(
-                   "TMA completion barrier is only supported on NVIDIA backend");
-             self.create<ttg::TMACopyOp>(src, dst, indices);
+            if (!barrier.is_none() || expectBytes > 0)
+              throw py::value_error(
+                  "TMA completion barrier is only supported on NVIDIA backend");
+            self.create<ttg::TMACopyOp>(src, dst, indices);
 #else
              auto &builder = self.getBuilder();
              Value barrierValue;
@@ -237,8 +238,8 @@ void init_triton_tle_ir(py::module &&m) {
              self.create<ttg::TMACopyOp>(src, dst, indices, barrierValue,
                                          expectBytesAttr);
 #endif
-             return;
-           })
+            return;
+          })
       .def("create_local_load",
            [](TritonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
              return self.create<ttg::LocalLoadOp>(resultTy, memDesc);
@@ -251,18 +252,16 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
               mlir::Value &c, triton::InputPrecision inputPrecision,
               int maxNumImpreciseAcc, bool isAsync) -> mlir::Value {
-             return self.create<tle::WGMMAOp>(
-                 c.getType(), a, b, c, inputPrecision, maxNumImpreciseAcc,
-                 isAsync);
+             return self.create<tle::WGMMAOp>(c.getType(), a, b, c,
+                                              inputPrecision,
+                                              maxNumImpreciseAcc, isAsync);
            })
       .def("create_tle_wgmma_wait",
            [](TritonOpBuilder &self, mlir::Value &input,
               unsigned pendings) -> mlir::Value {
-             auto pendingsAttr =
-                 self.getBuilder().getI32IntegerAttr(pendings);
+             auto pendingsAttr = self.getBuilder().getI32IntegerAttr(pendings);
              return self
-                 .create<tle::WGMMAWaitOp>(input.getType(), input,
-                                           pendingsAttr)
+                 .create<tle::WGMMAWaitOp>(input.getType(), input, pendingsAttr)
                  .getOutput();
            })
       .def("create_warp_group_dot",
@@ -301,8 +300,8 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
            })
       .def("create_memdesc_trans",
-           [](TritonOpBuilder &self, Value src, std::vector<int> &order)
-               -> Value {
+           [](TritonOpBuilder &self, Value src,
+              std::vector<int> &order) -> Value {
              return self.create<ttg::MemDescTransOp>(src, order);
            })
       .def("create_barrier_alloc",
@@ -352,7 +351,8 @@ void init_triton_tle_ir(py::module &&m) {
              auto &builder = self.getBuilder();
              self.create<tle::BarrierArriveOp>(
                  barrier, Value(), builder.getStringAttr("named"),
-                 builder.getI32IntegerAttr(1), builder.getI32IntegerAttr(namedId),
+                 builder.getI32IntegerAttr(1),
+                 builder.getI32IntegerAttr(namedId),
                  builder.getI32IntegerAttr(numThreads));
            })
       .def("create_memdesc_subslice",
@@ -643,8 +643,7 @@ void init_triton_tle_passes(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_lower_wgmma", tle::createTritonTleLowerWGMMA);
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
-  ADD_PASS_WRAPPER_0("add_lower_barriers",
-                     tle::createTritonTleLowerBarriers);
+  ADD_PASS_WRAPPER_0("add_lower_barriers", tle::createTritonTleLowerBarriers);
   ADD_PASS_WRAPPER_0("add_allocate_named_barriers",
                      tle::createTritonTleAllocateNamedBarriers);
   ADD_PASS_WRAPPER_0("add_lower_tma_copy", tle::createTritonTleLowerTmaCopy);

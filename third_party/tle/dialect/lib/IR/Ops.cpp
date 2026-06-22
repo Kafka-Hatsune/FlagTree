@@ -203,15 +203,13 @@ LogicalResult WGMMAOp::verify() {
   auto cType = cast<RankedTensorType>(getC().getType());
   auto dType = cast<RankedTensorType>(getD().getType());
 
-  if (aType.getRank() != 2 || bType.getRank() != 2 ||
-      cType.getRank() != 2)
+  if (aType.getRank() != 2 || bType.getRank() != 2 || cType.getRank() != 2)
     return emitOpError("expects rank-2 A, B, and accumulator operands");
   if (!isa<triton::gpu::SharedMemorySpaceAttr>(bType.getMemorySpace()))
     return emitOpError("expects shared-memory B descriptor");
   if (auto aMemDescType =
           dyn_cast<triton::gpu::MemDescType>(getA().getType())) {
-    if (!isa<triton::gpu::SharedMemorySpaceAttr>(
-            aMemDescType.getMemorySpace()))
+    if (!isa<triton::gpu::SharedMemorySpaceAttr>(aMemDescType.getMemorySpace()))
       return emitOpError("expects shared-memory A descriptor");
   }
 
@@ -242,9 +240,8 @@ LogicalResult WGMMAWaitOp::verify() {
   return success();
 }
 
-static LogicalResult verifyBarrierMemDesc(Operation *op,
-                                          triton::gpu::MemDescType type,
-                                          bool array) {
+static LogicalResult
+verifyBarrierMemDesc(Operation *op, triton::gpu::MemDescType type, bool array) {
   if (!type.getElementType().isInteger(64))
     return op->emitOpError("expects i64 barrier storage");
   if (!isa<triton::gpu::SharedMemorySpaceAttr>(type.getMemorySpace()))
@@ -312,7 +309,8 @@ LogicalResult BarrierWaitOp::verify() {
   if (failed(verifyBarrierMemDesc(getOperation(), getBarrier().getType(),
                                   /*array=*/false)))
     return failure();
-  StringRef backend = getOperation()->getAttrOfType<StringAttr>("backend").getValue();
+  StringRef backend =
+      getOperation()->getAttrOfType<StringAttr>("backend").getValue();
   return verifyBarrierBackend(getOperation(), backend, bool(getPhase()),
                               getNamedId(), getNamedNumThreads());
 }
@@ -323,7 +321,8 @@ LogicalResult BarrierArriveOp::verify() {
     return failure();
   if (getArriveCount() <= 0)
     return emitOpError("arrive_count must be positive");
-  StringRef backend = getOperation()->getAttrOfType<StringAttr>("backend").getValue();
+  StringRef backend =
+      getOperation()->getAttrOfType<StringAttr>("backend").getValue();
   if (backend == "named" && getArriveCount() != 1)
     return emitOpError("named barrier arrive requires arrive_count = 1");
   return verifyBarrierBackend(getOperation(), backend, bool(getPhase()),

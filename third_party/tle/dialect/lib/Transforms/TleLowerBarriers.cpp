@@ -40,9 +40,8 @@ static Value createBarrierSlot(OpBuilder &builder, Location loc, Value array,
 }
 
 #if !defined(__HCU__)
-static std::pair<Value, Value> createNamedBarrierOperands(OpBuilder &builder,
-                                                         Location loc,
-                                                         Operation *op) {
+static std::pair<Value, Value>
+createNamedBarrierOperands(OpBuilder &builder, Location loc, Operation *op) {
   Value id =
       builder.create<arith::ConstantIntOp>(loc, getI32Attr(op, "named_id"), 32);
   Value threads = builder.create<arith::ConstantIntOp>(
@@ -71,8 +70,7 @@ struct TritonTleLowerBarriers
     for (BarrierWaitOp op : waits) {
       OpBuilder builder(op);
       Location loc = op.getLoc();
-      StringRef backend =
-          op->getAttrOfType<StringAttr>("backend").getValue();
+      StringRef backend = op->getAttrOfType<StringAttr>("backend").getValue();
       if (backend == "mbarrier") {
         builder.create<ttng::WaitBarrierOp>(loc, op.getBarrier(),
                                             op.getPhase());
@@ -94,8 +92,7 @@ struct TritonTleLowerBarriers
     for (BarrierArriveOp op : arrives) {
       OpBuilder builder(op);
       Location loc = op.getLoc();
-      StringRef backend =
-          op->getAttrOfType<StringAttr>("backend").getValue();
+      StringRef backend = op->getAttrOfType<StringAttr>("backend").getValue();
       if (backend == "mbarrier") {
         int64_t count = getI32Attr(op.getOperation(), "arrive_count");
         builder.create<ttng::ArriveBarrierOp>(loc, op.getBarrier(),
@@ -141,8 +138,8 @@ struct TritonTleLowerBarriers
       int64_t arriveCount = getI32Attr(op.getOperation(), "arrive_count");
       for (int64_t i = 0; i < numBarriers; ++i) {
         Value slot = createBarrierSlot(builder, loc, alloc, i);
-        builder.create<ttng::InitBarrierOp>(
-            loc, slot, static_cast<uint32_t>(arriveCount));
+        builder.create<ttng::InitBarrierOp>(loc, slot,
+                                            static_cast<uint32_t>(arriveCount));
       }
       op.getResult().replaceAllUsesWith(alloc);
       op.erase();

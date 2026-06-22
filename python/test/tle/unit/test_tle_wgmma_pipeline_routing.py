@@ -6,7 +6,6 @@ from triton._C.libtriton import ir
 from triton.backends.compiler import GPUTarget
 from triton.compiler.compiler import ASTSource, make_backend
 
-
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _USER_PROMISE_MODE = "user_promise"
 

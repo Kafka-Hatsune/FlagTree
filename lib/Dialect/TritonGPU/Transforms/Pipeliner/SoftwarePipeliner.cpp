@@ -37,10 +37,9 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUPIPELINE
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-static constexpr llvm::StringLiteral kTleWgmmaPipelineModeAttr(
-    "tle.wgmma_pipeline_mode");
-static constexpr llvm::StringLiteral kTleWgmmaCompilerAutoMode(
-    "compiler_auto");
+static constexpr llvm::StringLiteral
+    kTleWgmmaPipelineModeAttr("tle.wgmma_pipeline_mode");
+static constexpr llvm::StringLiteral kTleWgmmaCompilerAutoMode("compiler_auto");
 static constexpr llvm::StringLiteral kTleWgmmaUserPromiseMode("user_promise");
 
 static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
@@ -49,8 +48,7 @@ static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
           moduleOp->getAttrOfType<StringAttr>(kTleWgmmaPipelineModeAttr))
     mode = attr.getValue();
 
-  if (mode != kTleWgmmaCompilerAutoMode &&
-      mode != kTleWgmmaUserPromiseMode) {
+  if (mode != kTleWgmmaCompilerAutoMode && mode != kTleWgmmaUserPromiseMode) {
     moduleOp.emitError("TLE WGMMA pipeline mode module attribute '")
         << kTleWgmmaPipelineModeAttr << "' must be '"
         << kTleWgmmaCompilerAutoMode << "' or '" << kTleWgmmaUserPromiseMode

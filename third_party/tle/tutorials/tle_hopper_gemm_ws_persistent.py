@@ -29,7 +29,6 @@ import triton.language as tl
 import triton.experimental.tle.language as tle
 from triton.tools.tensor_descriptor import TensorDescriptor
 
-
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
@@ -402,7 +401,7 @@ def tle_ws_persistent_matmul(
     b_desc = TensorDescriptor.from_tensor(b, block_shape=[bk, bn])
     c_desc = TensorDescriptor.from_tensor(c, block_shape=[bm // 2, bn])
     num_sms = torch.cuda.get_device_properties(a.device).multi_processor_count
-    grid = (min(num_sms, triton.cdiv(m, bm) * triton.cdiv(n, bn)),)
+    grid = (min(num_sms, triton.cdiv(m, bm) * triton.cdiv(n, bn)), )
     a_stage_capacity = _next_power_of_2(num_stages * 2)
     b_stage_capacity = _next_power_of_2(num_stages)
 
@@ -465,7 +464,7 @@ def tle_ws_nonpersistent_matmul(
     a_desc = TensorDescriptor.from_tensor(a, block_shape=[bm // 2, bk])
     b_desc = TensorDescriptor.from_tensor(b, block_shape=[bk, bn])
     c_desc = TensorDescriptor.from_tensor(c, block_shape=[bm // 2, bn])
-    grid = (triton.cdiv(m, bm) * triton.cdiv(n, bn),)
+    grid = (triton.cdiv(m, bm) * triton.cdiv(n, bn), )
     a_stage_capacity = _next_power_of_2(num_stages * 2)
     b_stage_capacity = _next_power_of_2(num_stages)
 
@@ -517,10 +516,8 @@ class GemmConfig:
 
     def label(self) -> str:
         wait = "pipe" if self.wgmma_pipeline else "sync"
-        return (
-            f"BM{self.bm}.BN{self.bn}.BK{self.bk}.S{self.num_stages}."
-            f"G{self.group_size_m}.P{self.producer_num_warps}.{wait}"
-        )
+        return (f"BM{self.bm}.BN{self.bn}.BK{self.bk}.S{self.num_stages}."
+                f"G{self.group_size_m}.P{self.producer_num_warps}.{wait}")
 
 
 def parse_problem(text: str) -> Problem:
@@ -534,12 +531,10 @@ def parse_gemm_config(text: str) -> GemmConfig:
         dims = [int(x) for x in dims_text.lower().replace(",", "x").split("x")]
     except Exception as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid config '{text}', expected BMxBNxBKxSTAGES[xGROUP_SIZE_M[xPRODUCER_WARPS]][:pipe|sync]"
-        ) from exc
+            f"invalid config '{text}', expected BMxBNxBKxSTAGES[xGROUP_SIZE_M[xPRODUCER_WARPS]][:pipe|sync]") from exc
     if len(dims) not in (4, 5, 6):
         raise argparse.ArgumentTypeError(
-            f"invalid config '{text}', expected BMxBNxBKxSTAGES[xGROUP_SIZE_M[xPRODUCER_WARPS]][:pipe|sync]"
-        )
+            f"invalid config '{text}', expected BMxBNxBKxSTAGES[xGROUP_SIZE_M[xPRODUCER_WARPS]][:pipe|sync]")
     mode = mode_text.lower() or "pipe"
     if mode in ("pipe", "pipeline", "pipelined", "wait1"):
         wgmma_pipeline = True
@@ -563,8 +558,7 @@ def default_compare_configs(args: argparse.Namespace) -> list[GemmConfig]:
     aligned_bn = 256 if args.bn == 128 else args.bn
     aligned_stages = 2 if args.num_stages != 2 else args.num_stages
     configs.append(
-        GemmConfig(args.bm, aligned_bn, args.bk, aligned_stages, args.group_size_m, True, args.producer_num_warps)
-    )
+        GemmConfig(args.bm, aligned_bn, args.bk, aligned_stages, args.group_size_m, True, args.producer_num_warps))
 
     unique: list[GemmConfig] = []
     for cfg in configs:
@@ -573,7 +567,8 @@ def default_compare_configs(args: argparse.Namespace) -> list[GemmConfig]:
     return unique
 
 
-def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *, cuda_graph: bool = False) -> tuple[float, float, float]:
+def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *,
+             cuda_graph: bool = False) -> tuple[float, float, float]:
     if cuda_graph:
         result = triton.testing.do_bench_cudagraph(fn, rep=rep, quantiles=(0.5, 0.2, 0.8))
     else:
@@ -654,7 +649,8 @@ def make_baseline_row(
     return row
 
 
-def make_error_row(variant: str, problem: Problem, note: str, extra: dict[str, object] | None = None) -> dict[str, object]:
+def make_error_row(variant: str, problem: Problem, note: str,
+                   extra: dict[str, object] | None = None) -> dict[str, object]:
     row: dict[str, object] = {
         "variant": variant,
         "M": problem.m,
@@ -716,6 +712,7 @@ def run_torch_matmul_baseline(
         def run():
             torch.matmul(a, b, out=c)
     else:
+
         def run():
             torch.matmul(a, b)
 
@@ -853,7 +850,8 @@ def run_tle_compare_variant(
         )
 
 
-def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_graph: bool = False) -> list[dict[str, object]]:
+def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *,
+                               cuda_graph: bool = False) -> list[dict[str, object]]:
     repo_root = find_flagtree_repo_root()
     if repo_root is None:
         return [
@@ -886,12 +884,8 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_
         {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64, "num_stages": 3, "num_warps": 4},
     ]
     for cfg in configs:
-        smem_bytes = (
-            cfg["num_stages"]
-            * cfg["BLOCK_SIZE_K"]
-            * (cfg["BLOCK_SIZE_M"] + cfg["BLOCK_SIZE_N"])
-            + cfg["BLOCK_SIZE_M"] * cfg["BLOCK_SIZE_N"]
-        ) * 2
+        smem_bytes = (cfg["num_stages"] * cfg["BLOCK_SIZE_K"] *
+                      (cfg["BLOCK_SIZE_M"] + cfg["BLOCK_SIZE_N"]) + cfg["BLOCK_SIZE_M"] * cfg["BLOCK_SIZE_N"]) * 2
         if smem_bytes > 228 * 1024:
             continue
 
@@ -899,10 +893,8 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_
             a = torch.randn((problem.m, problem.k), device=DEVICE, dtype=torch.float16).contiguous()
             b = torch.randn((problem.n, problem.k), device=DEVICE, dtype=torch.float16).contiguous()
             c = torch.empty((problem.m, problem.n), device=DEVICE, dtype=torch.float16)
-            grid = lambda meta: (
-                triton.cdiv(problem.m, meta["BLOCK_SIZE_M"])
-                * triton.cdiv(problem.n, meta["BLOCK_SIZE_N"]),
-            )
+            grid = lambda meta: (triton.cdiv(problem.m, meta["BLOCK_SIZE_M"]) * triton.cdiv(
+                problem.n, meta["BLOCK_SIZE_N"]), )
 
             def launch():
                 return module.matmul_tma_ws_kernel[grid](
@@ -943,8 +935,7 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_
                     has_warp_specialize="ttg.warp_specialize" in ttgir,
                     has_wgmma="ttng.warp_group_dot" in ttgir,
                     cuda_graph=cuda_graph,
-                )
-            )
+                ))
         except Exception as exc:
             rows.append(
                 make_error_row(
@@ -952,8 +943,7 @@ def run_native_ws_tma_variants(problem: Problem, warmup: int, rep: int, *, cuda_
                     problem,
                     f"compile/run failed: {type(exc).__name__}: {exc}",
                     cfg,
-                )
-            )
+                ))
     return rows
 
 
@@ -976,8 +966,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     args.rep,
                     use_out=False,
                     cuda_graph=args.cuda_graph,
-                )
-            )
+                ))
         if args.include_torch:
             problem_rows.append(
                 run_torch_matmul_baseline(
@@ -989,8 +978,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     args.rep,
                     use_out=True,
                     cuda_graph=args.cuda_graph,
-                )
-            )
+                ))
 
         ref = torch.matmul(a, b) if args.check else None
         for cfg in configs:
@@ -1006,8 +994,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                     persistent=True,
                     dump_summary=args.dump_summary,
                     cuda_graph=args.cuda_graph,
-                )
-            )
+                ))
         if not args.no_nonpersistent:
             for cfg in configs:
                 problem_rows.append(
@@ -1022,8 +1009,7 @@ def run_compare(args: argparse.Namespace, problems: list[Problem]) -> list[dict[
                         persistent=False,
                         dump_summary=args.dump_summary,
                         cuda_graph=args.cuda_graph,
-                    )
-                )
+                    ))
 
         if not args.no_native:
             problem_rows.extend(run_native_ws_tma_variants(problem, args.warmup, args.rep, cuda_graph=args.cuda_graph))
@@ -1111,8 +1097,7 @@ def main() -> None:
                     args.rep,
                     use_out=False,
                     cuda_graph=args.cuda_graph,
-                )
-            )
+                ))
         if args.include_torch:
             problem_rows.append(
                 run_torch_matmul_baseline(
@@ -1124,8 +1109,7 @@ def main() -> None:
                     args.rep,
                     use_out=True,
                     cuda_graph=args.cuda_graph,
-                )
-            )
+                ))
 
         wgmma_pipeline = not args.no_wgmma_pipeline
         matmul_fn = tle_ws_nonpersistent_matmul if args.non_persistent else tle_ws_persistent_matmul
@@ -1195,8 +1179,7 @@ def main() -> None:
                 has_warp_specialize=has_warp_specialize,
                 has_wgmma=has_wgmma,
                 cuda_graph=args.cuda_graph,
-            )
-        )
+            ))
         if args.compare or args.include_cublas:
             add_cublas_speedups(problem_rows)
         rows.extend(problem_rows)

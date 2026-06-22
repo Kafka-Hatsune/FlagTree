@@ -22,7 +22,6 @@ import triton.language as tl
 import triton.experimental.tle.language as tle
 from triton.tools.tensor_descriptor import TensorDescriptor
 
-
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
@@ -207,10 +206,10 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
                 tile_count += 1
 
         with tle.gpu.async_task(
-            num_warps=NUM_MMA_WARPS // NUM_MMA_GROUPS,
-            registers=232,
-            replicate=NUM_MMA_GROUPS,
-            name="mma",
+                num_warps=NUM_MMA_WARPS // NUM_MMA_GROUPS,
+                registers=232,
+                replicate=NUM_MMA_GROUPS,
+                name="mma",
         ):
             cid: tl.constexpr = tle.gpu.async_task_replica_id()
             prog_id = tl.program_id(0)
@@ -378,18 +377,14 @@ def tle_attention(
     y_dim = z * h * n_ctx
     block_m_split = block_m // num_mma_groups
 
-    desc_q = TensorDescriptor(q, shape=[y_dim, head_dim], strides=[head_dim, 1],
-                              block_shape=[block_m_split, head_dim])
-    desc_k = TensorDescriptor(k, shape=[y_dim, head_dim], strides=[head_dim, 1],
-                              block_shape=[block_n, head_dim])
-    desc_v = TensorDescriptor(v, shape=[y_dim, head_dim], strides=[head_dim, 1],
-                              block_shape=[block_n, head_dim])
-    desc_o = TensorDescriptor(o, shape=[y_dim, head_dim], strides=[head_dim, 1],
-                              block_shape=[block_m_split, head_dim])
+    desc_q = TensorDescriptor(q, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_m_split, head_dim])
+    desc_k = TensorDescriptor(k, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_n, head_dim])
+    desc_v = TensorDescriptor(v, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_n, head_dim])
+    desc_o = TensorDescriptor(o, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_m_split, head_dim])
 
     num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
     total_tiles = triton.cdiv(n_ctx, block_m) * z * h
-    grid = (min(num_sms, total_tiles),)
+    grid = (min(num_sms, total_tiles), )
     q_stage_capacity = _next_power_of_2(num_buffers_q * num_mma_groups)
     kv_stage_capacity = _next_power_of_2(num_buffers_kv)
 
@@ -440,7 +435,8 @@ def sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sm_scale: 
     )
 
 
-def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *, cuda_graph: bool = False) -> tuple[float, float, float]:
+def bench_ms(fn: Callable[[], object], warmup: int, rep: int, *,
+             cuda_graph: bool = False) -> tuple[float, float, float]:
     if cuda_graph:
         result = triton.testing.do_bench_cudagraph(fn, rep=rep, quantiles=(0.5, 0.2, 0.8))
     else:
@@ -555,8 +551,7 @@ def main() -> None:
                         help="benchmark by capturing the workload once and timing CUDA Graph replay")
     parser.add_argument("--out", default=None)
     parser.add_argument("--check", action="store_true")
-    parser.add_argument("--include-sdpa", action="store_true",
-                        help="also benchmark torch SDPA on the same inputs")
+    parser.add_argument("--include-sdpa", action="store_true", help="also benchmark torch SDPA on the same inputs")
     parser.add_argument("--sdpa-requires-grad", action="store_true",
                         help="set q/k/v.requires_grad_() to match the TLX SDPA perf test")
     parser.add_argument("--continue-on-tle-error", action="store_true",
@@ -579,7 +574,7 @@ def main() -> None:
             v.requires_grad_()
         sm_scale = args.sm_scale
         if sm_scale is None:
-            sm_scale = problem.head_dim ** -0.5
+            sm_scale = problem.head_dim**-0.5
 
         if args.include_sdpa:
             sdpa_out = sdpa_attention(q, k, v, sm_scale)
@@ -589,24 +584,25 @@ def main() -> None:
                 sdpa_attention(q, k, v, sm_scale)
 
             ms, p20, p80 = bench_ms(run_sdpa, args.warmup, args.rep, cuda_graph=args.cuda_graph)
-            rows.append(make_row(
-                "SDPA",
-                problem,
-                ms,
-                p20,
-                p80,
-                args.block_m,
-                args.block_n,
-                {
-                    "output_dtype": str(sdpa_out.dtype).replace("torch.", ""),
-                    "has_warp_specialize": False,
-                    "has_wgmma": False,
-                    "baseline_source": "torch.nn.functional.scaled_dot_product_attention",
-                    "requires_grad": args.sdpa_requires_grad,
-                    "status": "ok",
-                },
-                cuda_graph=args.cuda_graph,
-            ))
+            rows.append(
+                make_row(
+                    "SDPA",
+                    problem,
+                    ms,
+                    p20,
+                    p80,
+                    args.block_m,
+                    args.block_n,
+                    {
+                        "output_dtype": str(sdpa_out.dtype).replace("torch.", ""),
+                        "has_warp_specialize": False,
+                        "has_wgmma": False,
+                        "baseline_source": "torch.nn.functional.scaled_dot_product_attention",
+                        "requires_grad": args.sdpa_requires_grad,
+                        "status": "ok",
+                    },
+                    cuda_graph=args.cuda_graph,
+                ))
 
         try:
             o, m, kernel = tle_attention(
@@ -649,27 +645,29 @@ def main() -> None:
             if args.dump_summary:
                 extra["ttgir_len"] = len(kernel.asm.get("ttgir", ""))
                 extra["ptx_len"] = len(kernel.asm.get("ptx", ""))
-            rows.append(make_row(
-                "flagtree.tle.fa3.ws_pipelined_pingpong_persistent",
-                problem,
-                ms,
-                p20,
-                p80,
-                args.block_m,
-                args.block_n,
-                extra,
-                cuda_graph=args.cuda_graph,
-            ))
+            rows.append(
+                make_row(
+                    "flagtree.tle.fa3.ws_pipelined_pingpong_persistent",
+                    problem,
+                    ms,
+                    p20,
+                    p80,
+                    args.block_m,
+                    args.block_n,
+                    extra,
+                    cuda_graph=args.cuda_graph,
+                ))
         except Exception as exc:
             if not args.continue_on_tle_error:
                 raise
-            rows.append(make_error_row(
-                "flagtree.tle.fa3.ws_pipelined_pingpong_persistent",
-                problem,
-                args.block_m,
-                args.block_n,
-                exc,
-            ))
+            rows.append(
+                make_error_row(
+                    "flagtree.tle.fa3.ws_pipelined_pingpong_persistent",
+                    problem,
+                    args.block_m,
+                    args.block_n,
+                    exc,
+                ))
 
     write_rows(rows, args.out)
 
