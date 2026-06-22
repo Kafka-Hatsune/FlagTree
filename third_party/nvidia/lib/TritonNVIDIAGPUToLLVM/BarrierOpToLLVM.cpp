@@ -280,7 +280,7 @@ struct ArriveBarrierOpConversion
   }
 };
 
-#if !defined(__HCU__)
+#if defined(__TLE__) && !defined(__HCU__)
 struct NamedBarrierArriveOpConversion
     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::NamedBarrierArriveOp> {
   using ConvertOpToLLVMPattern<
@@ -325,7 +325,7 @@ void mlir::triton::NVIDIA::populateBarrierOpToLLVMPatterns(
   patterns.add<WaitBarrierOpConversion>(typeConverter, benefit, targetInfo);
   patterns.add<BarrierExpectConversion>(typeConverter, benefit);
   patterns.add<ArriveBarrierOpConversion>(typeConverter, benefit);
-#if !defined(__HCU__)
+#if defined(__TLE__) && !defined(__HCU__)
   patterns.add<NamedBarrierArriveOpConversion>(typeConverter, benefit);
   patterns.add<NamedBarrierWaitOpConversion>(typeConverter, benefit);
 #endif

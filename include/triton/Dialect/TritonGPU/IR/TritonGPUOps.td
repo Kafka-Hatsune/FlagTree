@@ -598,6 +598,7 @@ def TTG_LocalBarrierOp : TTG_Op<"local_barrier"> {
 }
 
 // flagtree tle
+#ifdef __TLE__
 def TTG_TMACopyOp : TTG_Op<"tma_copy", [
   Pure,
   MemoryEffects<[MemWrite]>,
@@ -630,5 +631,24 @@ def TTG_TMACopyOp : TTG_Op<"tma_copy", [
     (`,` qualified(type($barrier))^)?
   }];
 }
+#else
+def TTG_TMACopyOp : TTG_Op<"tma_copy", [Pure, MemoryEffects<[MemWrite]>]> {
+  let summary = "self-defined tma_copy operation";
+  let description = [{
+    'ttg.tma_copy' triton copy op is designed to copy data between memory regions.
+    Example:
+    ```mlir
+    ttg.tma_copy %src, %dst, %shape : tensor<128xf32>
+    ```
+  }];
+  let arguments = (ins
+    Arg<TTG_CopyOpType, "", [MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>:$src,
+    Arg<TTG_CopyOpType, "", [MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>:$dst,
+    Variadic<I32>:$indices
+  );
+  //assemble
+  let assemblyFormat = "$src `,`  $dst `,` `[` $indices `]` attr-dict `:` type($src) `,` type($dst)";
+}
+#endif
 
 #endif // TRITONGPU_OPS

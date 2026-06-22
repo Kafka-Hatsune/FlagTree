@@ -37,12 +37,15 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUPIPELINE
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
+#ifdef __TLE__
 static constexpr llvm::StringLiteral
     kTleWgmmaPipelineModeAttr("tle.wgmma_pipeline_mode");
 static constexpr llvm::StringLiteral kTleWgmmaCompilerAutoMode("compiler_auto");
 static constexpr llvm::StringLiteral kTleWgmmaUserPromiseMode("user_promise");
+#endif
 
 static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
+#ifdef __TLE__
   StringRef mode = kTleWgmmaCompilerAutoMode;
   if (auto attr =
           moduleOp->getAttrOfType<StringAttr>(kTleWgmmaPipelineModeAttr))
@@ -55,6 +58,7 @@ static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
         << "', got '" << mode << "'";
     return failure();
   }
+#endif
 
   SmallVector<scf::ForOp> loops;
   moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
