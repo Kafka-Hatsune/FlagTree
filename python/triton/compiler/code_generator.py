@@ -1191,21 +1191,14 @@ class CodeGenerator(ast.NodeVisitor):
 
             consumer_entries = []
             consumer_regs = []
-            consumer_start_ids = []
             any_regs = False
-            any_start_ids = False
             for stmt, task in zip(stmts, tasks):
                 if task.is_producer:
                     continue
                 any_regs = any_regs or task.num_regs is not None
-                any_start_ids = any_start_ids or task.warp_group_start_id is not None
                 for replica_id in range(task.replicate):
                     consumer_entries.append((stmt, task, replica_id))
                     consumer_regs.append(task.num_regs)
-                    if task.warp_group_start_id is None:
-                        consumer_start_ids.append(None)
-                    else:
-                        consumer_start_ids.append(task.warp_group_start_id + replica_id * task.num_warps)
 
             if not consumer_entries:
                 self._set_insertion_point_and_loc(ip, last_loc)
@@ -1219,9 +1212,6 @@ class CodeGenerator(ast.NodeVisitor):
 
             if any_regs and any(reg is None for reg in consumer_regs):
                 raise self._unsupported(node, "consumer async_task registers must be set for all consumers or none")
-            if any_start_ids and any(start_id is None for start_id in consumer_start_ids):
-                raise self._unsupported(
-                    node, "consumer async_task warp_group_start_id must be set for all consumers or none")
 
             used_before = set(self.used_vars)
             dry_block = self.builder.create_block()
@@ -1248,10 +1238,6 @@ class CodeGenerator(ast.NodeVisitor):
             ws_op = self.builder.create_warp_specialize([], capture_handles, partition_num_warps)
             if any_regs:
                 ws_op.set_requested_registers(consumer_regs)
-            if any_start_ids:
-                if not hasattr(ws_op, "set_warp_group_start_ids"):
-                    raise self._unsupported(node, "this build does not expose warp_group_start_id support")
-                ws_op.set_warp_group_start_ids(consumer_start_ids)
 
             default_block = self.builder.create_block_with_parent(ws_op.get_default_region(), [])
             self.builder.create_block_with_parent(ws_op.get_partition_op_holder(), [])

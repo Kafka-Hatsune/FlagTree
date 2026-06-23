@@ -68,7 +68,8 @@ class async_task:
         self.num_warps = tl._unwrap_if_constexpr(kwargs.get("num_warps", None))
         self.num_regs = tl._unwrap_if_constexpr(kwargs.get("num_regs", kwargs.get("registers", None)))
         self.replicate = tl._unwrap_if_constexpr(kwargs.get("replicate", 1))
-        self.warp_group_start_id = tl._unwrap_if_constexpr(kwargs.get("warp_group_start_id", None))
+        if "warp_group_start_id" in kwargs:
+            raise ValueError("async_task warp_group_start_id is not supported")
 
         if self.replicate is None or self.replicate < 1:
             raise ValueError("async_task replicate must be a positive integer")
