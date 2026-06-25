@@ -39,13 +39,14 @@ static bool isInWarpSpecializePartition(OpResult result) {
   return owner && owner->getParentOfType<WarpSpecializePartitionsOp>();
 }
 
-static Type convertTleResultType(TypeConverter *converter, OpResult result) {
+static Type convertTleResultType(const TypeConverter *converter,
+                                 OpResult result) {
   return isInWarpSpecializePartition(result)
              ? converter->convertType(result)
              : converter->convertType(result.getType());
 }
 
-static LogicalResult convertTleResultTypes(TypeConverter *converter,
+static LogicalResult convertTleResultTypes(const TypeConverter *converter,
                                            ResultRange results,
                                            SmallVectorImpl<Type> &resultTypes) {
   for (OpResult result : results) {
