@@ -34,20 +34,23 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
 }
 
 #ifdef __TLE__
-static bool isInWarpSpecializePartition(Value result) {
-  Operation *owner = result.getDefiningOp();
-  return owner && owner->getParentOfType<WarpSpecializePartitionsOp>();
+static bool
+needsTleContextualResultType(const TritonGPUTypeConverter *converter,
+                             Value result) {
+  assert(converter && "expected a TritonGPU type converter");
+  return converter->getNumWarps(result) != converter->getNumWarps();
 }
 
-static Type convertTleResultType(const TypeConverter *converter, Value result) {
-  return isInWarpSpecializePartition(result)
+static Type convertTleResultType(const TritonGPUTypeConverter *converter,
+                                 Value result) {
+  return needsTleContextualResultType(converter, result)
              ? converter->convertType(result)
              : converter->convertType(result.getType());
 }
 
-static LogicalResult convertTleResultTypes(const TypeConverter *converter,
-                                           ResultRange results,
-                                           SmallVectorImpl<Type> &resultTypes) {
+static LogicalResult
+convertTleResultTypes(const TritonGPUTypeConverter *converter,
+                      ResultRange results, SmallVectorImpl<Type> &resultTypes) {
   for (OpResult result : results) {
     Type resultType = convertTleResultType(converter, result);
     if (!resultType)
@@ -66,8 +69,10 @@ template <class Op> struct GenericOpPattern : public OpConversionPattern<Op> {
                   ConversionPatternRewriter &rewriter) const override {
     SmallVector<Type> retTypes;
 #ifdef __TLE__
-    if (failed(convertTleResultTypes(this->getTypeConverter(), op->getResults(),
-                                     retTypes)))
+    auto typeConverter =
+        this->template getTypeConverter<TritonGPUTypeConverter>();
+    if (failed(
+            convertTleResultTypes(typeConverter, op->getResults(), retTypes)))
       return failure();
 #else
     if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
@@ -90,7 +95,8 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Type retType =
 #ifdef __TLE__
-        convertTleResultType(getTypeConverter(), op.getResult());
+        convertTleResultType(getTypeConverter<TritonGPUTypeConverter>(),
+                             op.getResult());
 #else
         getTypeConverter()->convertType(op.getType());
 #endif
@@ -333,7 +339,8 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
     // will evolve when we add support for `can_reorder=False`.
     auto retType = cast<RankedTensorType>(
 #ifdef __TLE__
-        convertTleResultType(this->getTypeConverter(), op.getResult()));
+        convertTleResultType(this->getTypeConverter<TritonGPUTypeConverter>(),
+                             op.getResult()));
 #else
         this->getTypeConverter()->convertType(op.getType()));
 #endif
@@ -526,7 +533,11 @@ struct TritonMapElementwisePattern
   LogicalResult
   matchAndRewrite(triton::MapElementwiseOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#ifdef __TLE__
+    auto converter = getTypeConverter<TritonGPUTypeConverter>();
+#else
     auto converter = getTypeConverter();
+#endif
     SmallVector<Type> resultTys;
 #ifdef __TLE__
     auto err = convertTleResultTypes(converter, op.getResults(), resultTys);
@@ -670,6 +681,11 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
   LogicalResult
   matchAndRewrite(scf::ForOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#ifdef __TLE__
+    auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
+#else
+    auto typeConverter = getTypeConverter();
+#endif
     auto newOp =
         cast<scf::ForOp>(rewriter.cloneWithoutRegions(*op.getOperation()));
     rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
@@ -682,8 +698,8 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
     // The entry block may have a special conversion if `entryConversion` is
     // provided. On success, the new entry block to the region is returned for
     // convenience. Otherwise, failure is returned.
-    if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
-                                           *getTypeConverter()))) {
+    if (failed(
+            rewriter.convertRegionTypes(&newOp.getRegion(), *typeConverter))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
     // Change the clone to use the updated operands. We could have cloned with
@@ -719,6 +735,11 @@ public:
   LogicalResult
   matchAndRewrite(scf::IfOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#ifdef __TLE__
+    auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
+#else
+    auto typeConverter = getTypeConverter();
+#endif
     // TODO: Generalize this to any type conversion, not just 1:1.
     //
     // We need to implement something more sophisticated here that tracks which
@@ -769,7 +790,11 @@ public:
   LogicalResult
   matchAndRewrite(scf::WhileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#ifdef __TLE__
+    auto *converter = getTypeConverter<TritonGPUTypeConverter>();
+#else
     auto *converter = getTypeConverter();
+#endif
     assert(converter);
     SmallVector<Type> newResultTypes;
 #ifdef __TLE__
@@ -879,7 +904,8 @@ public:
     newOp->setOperands(adaptor.getOperands());
     for (OpResult result : newOp->getResults()) {
 #ifdef __TLE__
-      result.setType(convertTleResultType(getTypeConverter(), result));
+      result.setType(convertTleResultType(
+          getTypeConverter<TritonGPUTypeConverter>(), result));
 #else
       result.setType(getTypeConverter()->convertType(result.getType()));
 #endif
