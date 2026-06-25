@@ -34,13 +34,12 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
 }
 
 #ifdef __TLE__
-static bool isInWarpSpecializePartition(OpResult result) {
-  Operation *owner = result.getOwner();
+static bool isInWarpSpecializePartition(Value result) {
+  Operation *owner = result.getDefiningOp();
   return owner && owner->getParentOfType<WarpSpecializePartitionsOp>();
 }
 
-static Type convertTleResultType(const TypeConverter *converter,
-                                 OpResult result) {
+static Type convertTleResultType(const TypeConverter *converter, Value result) {
   return isInWarpSpecializePartition(result)
              ? converter->convertType(result)
              : converter->convertType(result.getType());
