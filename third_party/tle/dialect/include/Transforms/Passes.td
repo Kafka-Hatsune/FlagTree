@@ -24,7 +24,7 @@ def TritonTleInlineAsyncTaskHelpers
 
   let description = [{
     This pass inlines private synthetic async_task helpers marked with
-    ``tle.async_task.helper`` back into ``ttg.warp_specialize`` partition
+    ``tle_async_task_helper`` back into ``ttg.warp_specialize`` partition
     regions. It runs immediately after ConvertTritonToTritonGPU so helper body
     layouts have already been selected using the helper's contextual
     ``ttg.num-warps`` attribute.

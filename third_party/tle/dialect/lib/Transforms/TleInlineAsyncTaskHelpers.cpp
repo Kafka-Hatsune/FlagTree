@@ -21,7 +21,7 @@ namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
 static constexpr llvm::StringLiteral kAsyncTaskHelperAttr =
-    "tle.async_task.helper";
+    "tle_async_task_helper";
 
 static LogicalResult verifyAsyncTaskHelper(tt::CallOp callOp,
                                            tt::FuncOp callee) {

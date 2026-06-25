@@ -1214,7 +1214,7 @@ class CodeGenerator(ast.NodeVisitor):
         helper_name = self._make_tle_async_task_helper_name(task, entry_idx, replica_id)
         helper_type = prototype.serialize(self.builder)
         helper = self.builder.get_or_insert_function(self.module, helper_name, helper_type, "private", True)
-        helper.set_attr("tle.async_task.helper", self.builder.get_unit_attr())
+        helper.set_attr("tle_async_task_helper", self.builder.get_unit_attr())
         self.module.push_back(helper)
         entry = helper.add_entry_block()
         caller_context = tle_gpu_core.WarpSpecializeCallerContext(task.num_warps)
