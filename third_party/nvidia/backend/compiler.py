@@ -279,6 +279,7 @@ class CUDABackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
         emuTF32 = (capability // 10 >= 8)
+        tle.passes.add_stamp_warp_context_encodings(pm)
         passes.ttir.add_convert_to_ttgpuir(pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
         tle.passes.add_inline_async_task_helpers(pm)
         # flagtree tle raw

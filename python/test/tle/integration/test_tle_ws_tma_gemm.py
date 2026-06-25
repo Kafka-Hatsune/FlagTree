@@ -181,6 +181,7 @@ class TestTLEAsyncTasksTmaGemm:
         ttgir = kernel.asm["ttgir"]
         assert "tt.call" not in ttgir
         assert "tle_async_task" not in ttgir
+        assert "warp_context" not in ttgir
         assert "num_warps(4)" in ttgir
 
         expected = torch.matmul(a.float(), b.float())

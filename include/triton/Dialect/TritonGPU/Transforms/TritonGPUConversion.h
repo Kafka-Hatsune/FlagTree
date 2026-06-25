@@ -16,9 +16,6 @@ public:
   TritonGPUTypeConverter(MLIRContext *context, int numWarps, int threadsPerWarp,
                          int numCTAs, bool enableSourceRemat);
   int getNumWarps() const { return numWarps; }
-#ifdef __TLE__
-  int getNumWarps(Value value) const;
-#endif
   int getThreadsPerWarp() const { return threadsPerWarp; }
   int getNumCTAs() const { return numCTAs; }
 #ifdef __TLE__

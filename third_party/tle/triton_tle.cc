@@ -613,6 +613,8 @@ void init_triton_tle_ir(py::module &&m) {
 void init_triton_tle_passes(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_early_assign_memory_space",
                      tle::createTritonTleEarlyAssignMemorySpace);
+  ADD_PASS_WRAPPER_0("add_stamp_warp_context_encodings",
+                     tle::createTritonTleStampWarpContextEncodings);
   ADD_PASS_WRAPPER_0("add_inline_async_task_helpers",
                      tle::createTritonTleInlineAsyncTaskHelpers);
   ADD_PASS_WRAPPER_0("add_select_encodings",

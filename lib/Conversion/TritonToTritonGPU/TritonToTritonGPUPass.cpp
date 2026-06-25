@@ -6,7 +6,6 @@
 #include "mlir/Transforms/DialectConversion.h"
 #ifdef __TLE__
 #include "tle/dialect/include/IR/Dialect.h"
-#include <optional>
 #endif
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -35,142 +34,60 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
 }
 
 #ifdef __TLE__
-static Type convertTleValueType(const TritonGPUTypeConverter *converter,
-                                Value value) {
-  assert(converter && "expected a TritonGPU type converter");
-  Type type = value.getType();
-  int contextualNumWarps = converter->getNumWarps(value);
-  if (auto tensorType = dyn_cast<RankedTensorType>(type))
-    return converter->convertRankedTensorType(tensorType, contextualNumWarps);
-
-  if (auto ptrType = dyn_cast<triton::PointerType>(type)) {
-    auto pointeeTensorType =
-        dyn_cast<RankedTensorType>(ptrType.getPointeeType());
-    if (pointeeTensorType)
-      return triton::PointerType::get(
-          converter->convertRankedTensorType(pointeeTensorType,
-                                             contextualNumWarps),
-          ptrType.getAddressSpace());
+static bool hasTleWarpContextEncoding(Type type) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
+    return isa_and_nonnull<triton::tle::WarpContextEncodingAttr>(
+        tensorType.getEncoding());
   }
 
-  return converter->convertType(type);
+  if (auto ptrType = dyn_cast<triton::PointerType>(type))
+    return hasTleWarpContextEncoding(ptrType.getPointeeType());
+
+  return false;
 }
 
-static Type convertTleResultType(const TritonGPUTypeConverter *converter,
-                                 Value result) {
-  return convertTleValueType(converter, result);
-}
+static LogicalResult verifyNoTleWarpContextEncodings(ModuleOp module) {
+  WalkResult result = module.walk([&](Operation *op) -> WalkResult {
+    for (Type type : op->getResultTypes()) {
+      if (hasTleWarpContextEncoding(type)) {
+        op->emitOpError("still has temporary TLE warp-context encoding after "
+                        "TritonGPU conversion");
+        return WalkResult::interrupt();
+      }
+    }
 
-static LogicalResult
-convertTleResultTypes(const TritonGPUTypeConverter *converter,
-                      ResultRange results, SmallVectorImpl<Type> &resultTypes) {
-  for (OpResult result : results) {
-    Type resultType = convertTleResultType(converter, result);
-    if (!resultType)
-      return failure();
-    resultTypes.push_back(resultType);
-  }
-  return success();
-}
+    for (Region &region : op->getRegions()) {
+      for (Block &block : region) {
+        for (BlockArgument arg : block.getArguments()) {
+          if (hasTleWarpContextEncoding(arg.getType())) {
+            op->emitOpError("still has block argument with temporary TLE "
+                            "warp-context encoding after TritonGPU conversion");
+            return WalkResult::interrupt();
+          }
+        }
+      }
+    }
 
-static LogicalResult
-convertTleRegionTypes(Region *region, const TritonGPUTypeConverter *converter,
-                      ConversionPatternRewriter &rewriter) {
-  assert(converter && "expected a TritonGPU type converter");
-  if (region->empty())
-    return success();
+    if (auto funcOp = dyn_cast<triton::FuncOp>(op)) {
+      for (Type type : funcOp.getFunctionType().getInputs()) {
+        if (hasTleWarpContextEncoding(type)) {
+          funcOp.emitOpError("still has function input with temporary TLE "
+                             "warp-context encoding after TritonGPU conversion");
+          return WalkResult::interrupt();
+        }
+      }
+      for (Type type : funcOp.getFunctionType().getResults()) {
+        if (hasTleWarpContextEncoding(type)) {
+          funcOp.emitOpError("still has function result with temporary TLE "
+                             "warp-context encoding after TritonGPU conversion");
+          return WalkResult::interrupt();
+        }
+      }
+    }
 
-  Block &entry = region->front();
-  TypeConverter::SignatureConversion conversion(entry.getNumArguments());
-  for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
-    Type newArgType = convertTleValueType(converter, entry.getArgument(i));
-    if (!newArgType)
-      return failure();
-    conversion.addInputs(i, newArgType);
-  }
-  return rewriter.convertRegionTypes(region, *converter, &conversion);
-}
-
-static FailureOr<RankedTensorType>
-convertTleTensorResultTypeForOp(const TritonGPUTypeConverter *converter,
-                                Operation *op, Value result) {
-  auto resultType = dyn_cast<RankedTensorType>(result.getType());
-  if (!resultType)
-    return failure();
-
-  if (std::optional<int> contextualNumWarps = maybeLookupNumWarps(op)) {
-    auto unencodedType =
-        RankedTensorType::get(resultType.getShape(),
-                              resultType.getElementType());
-    return converter->convertRankedTensorType(unencodedType,
-                                              *contextualNumWarps);
-  }
-
-  auto convertedType =
-      dyn_cast_or_null<RankedTensorType>(convertTleResultType(converter,
-                                                              result));
-  if (!convertedType)
-    return failure();
-  return convertedType;
-}
-
-static FailureOr<Value>
-coerceTleTensorValueToType(ConversionPatternRewriter &rewriter, Location loc,
-                           Value value, RankedTensorType targetType) {
-  if (value.getType() == targetType)
-    return value;
-
-  if (auto convert = value.getDefiningOp<triton::gpu::ConvertLayoutOp>()) {
-    if (convert.getSrc().getType() == targetType)
-      return convert.getSrc();
-  }
-
-  if (!isa<RankedTensorType>(value.getType()))
-    return failure();
-  return triton::gpu::ConvertLayoutOp::create(rewriter, loc, targetType,
-                                              value)
-      .getResult();
-}
-
-static FailureOr<Value>
-coerceTleValueToType(ConversionPatternRewriter &rewriter, Location loc,
-                     Value value, Type targetType) {
-  if (value.getType() == targetType)
-    return value;
-  if (auto targetTensorType = dyn_cast<RankedTensorType>(targetType))
-    return coerceTleTensorValueToType(rewriter, loc, value,
-                                      targetTensorType);
-  return failure();
-}
-
-static FailureOr<Value>
-coerceTleOperandToOriginalType(ConversionPatternRewriter &rewriter,
-                               Location loc,
-                               const TritonGPUTypeConverter *converter,
-                               Value operand, Value original) {
-  Type targetType = convertTleValueType(converter, original);
-  if (!targetType)
-    return failure();
-  return coerceTleValueToType(rewriter, loc, operand, targetType);
-}
-
-static LogicalResult
-coerceTleOperandsToOriginalTypes(ConversionPatternRewriter &rewriter,
-                                 Location loc,
-                                 const TritonGPUTypeConverter *converter,
-                                 Operation *op, ValueRange operands,
-                                 SmallVectorImpl<Value> &newOperands) {
-  if (operands.size() != op->getOperands().size())
-    return failure();
-  newOperands.reserve(operands.size());
-  for (auto [operand, original] : llvm::zip(operands, op->getOperands())) {
-    FailureOr<Value> coerced = coerceTleOperandToOriginalType(
-        rewriter, loc, converter, operand, original);
-    if (failed(coerced))
-      return failure();
-    newOperands.push_back(*coerced);
-  }
-  return success();
+    return WalkResult::advance();
+  });
+  return success(!result.wasInterrupted());
 }
 #endif
 
@@ -181,24 +98,11 @@ template <class Op> struct GenericOpPattern : public OpConversionPattern<Op> {
   matchAndRewrite(Op op, typename Op::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     SmallVector<Type> retTypes;
-#ifdef __TLE__
-    auto typeConverter =
-        this->template getTypeConverter<TritonGPUTypeConverter>();
-    if (failed(
-            convertTleResultTypes(typeConverter, op->getResults(), retTypes)))
-      return failure();
-    SmallVector<Value> operands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), typeConverter, op.getOperation(),
-            adaptor.getOperands(), operands)))
-      return failure();
-#else
     if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
                                                       retTypes)))
       return failure();
-    ValueRange operands = adaptor.getOperands();
-#endif
-    rewriter.replaceOpWithNewOp<Op>(op, retTypes, operands, op->getAttrs());
+    rewriter.replaceOpWithNewOp<Op>(op, retTypes, adaptor.getOperands(),
+                                    op->getAttrs());
 
     return success();
   }
@@ -211,13 +115,7 @@ public:
   LogicalResult
   matchAndRewrite(arith::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Type retType =
-#ifdef __TLE__
-        convertTleResultType(getTypeConverter<TritonGPUTypeConverter>(),
-                             op.getResult());
-#else
-        getTypeConverter()->convertType(op.getType());
-#endif
+    Type retType = getTypeConverter()->convertType(op.getType());
     auto retShapedType = cast<ShapedType>(retType);
     auto value = dyn_cast<DenseElementsAttr>(adaptor.getValue());
     if (isa<RankedTensorType>(retShapedType)) {
@@ -301,17 +199,9 @@ struct TritonExpandDimsPattern
   LogicalResult
   matchAndRewrite(triton::ExpandDimsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Value src = adaptor.getSrc();
-#ifdef __TLE__
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    if (failed(maybeSrc))
-      return failure();
-    src = *maybeSrc;
-#endif
     // Type retType = op.getType());
-    RankedTensorType argType = cast<RankedTensorType>(src.getType());
+    RankedTensorType argType =
+        cast<RankedTensorType>(adaptor.getSrc().getType());
     Attribute _argEncoding = argType.getEncoding();
     if (!_argEncoding)
       return failure();
@@ -352,7 +242,7 @@ struct TritonExpandDimsPattern
     RankedTensorType newArgType = argType.cloneWithEncoding(newArgEncoding);
     // construct new op
     auto newSrc = triton::gpu::ConvertLayoutOp::create(
-        rewriter, op.getLoc(), newArgType, src);
+        rewriter, op.getLoc(), newArgType, adaptor.getSrc());
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::ExpandDimsOp>(
                       op, newSrc, adaptor.getAxis()),
                   adaptor.getAttributes());
@@ -389,11 +279,7 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
     RankedTensorType origType = op.getType();
     auto origShape = origType.getShape();
     auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
-#ifdef __TLE__
-    int numWarps = typeConverter->getNumWarps(op.getResult());
-#else
     int numWarps = typeConverter->getNumWarps();
-#endif
     int threadsPerWarp = typeConverter->getThreadsPerWarp();
     int numCTAs = typeConverter->getNumCTAs();
     auto rank = origShape.size();
@@ -419,31 +305,18 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
         getContext(), origShape, retSizePerThread, retOrder, numWarps,
         threadsPerWarp, numCTAs);
     RankedTensorType retType = origType.cloneWithEncoding(dEncoding);
-    Value a = adaptor.getA();
-    Value b = adaptor.getB();
-    Value c = adaptor.getC();
-#ifdef __TLE__
-    FailureOr<Value> maybeA = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), typeConverter, a, op.getA());
-    FailureOr<Value> maybeB = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), typeConverter, b, op.getB());
-    FailureOr<Value> maybeC = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), typeConverter, c, op.getC());
-    if (failed(maybeA) || failed(maybeB) || failed(maybeC))
-      return failure();
-    a = *maybeA;
-    b = *maybeB;
-    c = *maybeC;
-#endif
     // a & b must be of smem layout
-    auto aType = cast<RankedTensorType>(a.getType());
-    auto bType = cast<RankedTensorType>(b.getType());
+    auto aType = cast<RankedTensorType>(adaptor.getA().getType());
+    auto bType = cast<RankedTensorType>(adaptor.getB().getType());
     Type aEltType = aType.getElementType();
     Type bEltType = bType.getElementType();
     Attribute aEncoding = aType.getEncoding();
     Attribute bEncoding = bType.getEncoding();
     if (!aEncoding || !bEncoding)
       return failure();
+    Value a = adaptor.getA();
+    Value b = adaptor.getB();
+    Value c = adaptor.getC();
     if (!mlir::isa<triton::gpu::DotOperandEncodingAttr>(aEncoding)) {
       Attribute encoding = triton::gpu::DotOperandEncodingAttr::get(
           getContext(), 0, dEncoding, aEltType);
@@ -458,15 +331,7 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
       b = triton::gpu::ConvertLayoutOp::create(rewriter, b.getLoc(), dstType,
                                                b);
     }
-#ifdef __TLE__
-    FailureOr<Value> maybeConvertedC =
-        coerceTleTensorValueToType(rewriter, c.getLoc(), c, retType);
-    if (failed(maybeConvertedC))
-      return failure();
-    c = *maybeConvertedC;
-#else
     c = triton::gpu::ConvertLayoutOp::create(rewriter, c.getLoc(), retType, c);
-#endif
 
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::DotOp>(
                       op, retType, a, b, c, adaptor.getInputPrecision(),
@@ -489,29 +354,11 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
     // For now, this behaves like generic, but this
     // will evolve when we add support for `can_reorder=False`.
     auto retType = cast<RankedTensorType>(
-#ifdef __TLE__
-        convertTleResultType(this->getTypeConverter<TritonGPUTypeConverter>(),
-                             op.getResult()));
-#else
         this->getTypeConverter()->convertType(op.getType()));
-#endif
     auto retEncoding =
         cast<triton::gpu::BlockedEncodingAttr>(retType.getEncoding());
-    Value lhs = adaptor.getLhs();
-    Value rhs = adaptor.getRhs();
-#ifdef __TLE__
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    FailureOr<Value> maybeLhs = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, lhs, op.getLhs());
-    FailureOr<Value> maybeRhs = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, rhs, op.getRhs());
-    if (failed(maybeLhs) || failed(maybeRhs))
-      return failure();
-    lhs = *maybeLhs;
-    rhs = *maybeRhs;
-#endif
-    auto lhsType = lhs.getType();
-    auto rhsType = rhs.getType();
+    auto lhsType = adaptor.getLhs().getType();
+    auto rhsType = adaptor.getRhs().getType();
     auto lhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(lhsType);
     auto rhsTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(rhsType);
     auto retTotalElemsPerThread = triton::gpu::getTotalElemsPerThread(retType);
@@ -532,9 +379,8 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
             getContext(), newRetSizePerThread, retThreadsPerWarp,
             retWarpsPerCTA, retOrder, retEncoding.getCTALayout());
     auto newRetType = retType.cloneWithEncoding(newRetEncoding);
-    SmallVector<Value> operands{lhs, rhs};
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::CatOp>(
-                      op, newRetType, operands),
+                      op, newRetType, adaptor.getOperands()),
                   adaptor.getAttributes());
     return success();
   }
@@ -545,24 +391,11 @@ struct TritonJoinOpPattern : public OpConversionPattern<triton::JoinOp> {
 
   LogicalResult matchAndRewrite(JoinOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
-    Value lhs = adaptor.getLhs();
-    Value rhs = adaptor.getRhs();
-#ifdef __TLE__
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    FailureOr<Value> maybeLhs = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, lhs, op.getLhs());
-    FailureOr<Value> maybeRhs = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, rhs, op.getRhs());
-    if (failed(maybeLhs) || failed(maybeRhs))
-      return failure();
-    lhs = *maybeLhs;
-    rhs = *maybeRhs;
-#endif
     // Simply rely on type inference for this op.  (Notably, GenericOpPattern
     // does not do this, instead it assigns the default layout to the ins and
     // outs.)
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::JoinOp>(
-                      op, lhs, rhs),
+                      op, adaptor.getLhs(), adaptor.getRhs()),
                   adaptor.getAttributes());
     return success();
   }
@@ -574,14 +407,6 @@ struct TritonSplitOpPattern : public OpConversionPattern<triton::SplitOp> {
   LogicalResult matchAndRewrite(SplitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
     auto src = adaptor.getSrc();
-#ifdef __TLE__
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    if (failed(maybeSrc))
-      return failure();
-    src = *maybeSrc;
-#endif
     auto srcTy = cast<RankedTensorType>(src.getType());
     auto srcEnc = dyn_cast<BlockedEncodingAttr>(srcTy.getEncoding());
     int rank = srcEnc.getOrder().size();
@@ -644,14 +469,6 @@ struct TritonTransPattern : public OpConversionPattern<TransOp> {
   matchAndRewrite(TransOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Value src = adaptor.getSrc();
-#ifdef __TLE__
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    if (failed(maybeSrc))
-      return failure();
-    src = *maybeSrc;
-#endif
     auto srcTy = cast<RankedTensorType>(src.getType());
     auto srcEnc = srcTy.getEncoding();
     if (!srcEnc)
@@ -670,23 +487,14 @@ struct TritonBroadcastPattern
   LogicalResult
   matchAndRewrite(BroadcastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Value src = adaptor.getSrc();
-#ifdef __TLE__
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    if (failed(maybeSrc))
-      return failure();
-    src = *maybeSrc;
-#endif
-    auto srcType = cast<RankedTensorType>(src.getType());
+    auto srcType = cast<RankedTensorType>(adaptor.getSrc().getType());
     auto srcEncoding = srcType.getEncoding();
     if (!srcEncoding)
       return failure();
     Type retType = op.getType().cloneWithEncoding(srcEncoding);
     // Type retType = this->getTypeConverter()->convertType(op.getType());
     addNamedAttrs(rewriter.replaceOpWithNewOp<triton::BroadcastOp>(
-                      op, retType, src),
+                      op, retType, adaptor.getOperands()),
                   adaptor.getAttributes());
     return success();
   }
@@ -698,17 +506,8 @@ struct TritonReducePattern : public OpConversionPattern<triton::ReduceOp> {
   LogicalResult
   matchAndRewrite(triton::ReduceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    ValueRange operands = adaptor.getOperands();
-#ifdef __TLE__
-    SmallVector<Value> coercedOperands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(),
-            op.getOperation(), adaptor.getOperands(), coercedOperands)))
-      return failure();
-    operands = coercedOperands;
-#endif
     auto newReduce = triton::ReduceOp::create(
-        rewriter, op.getLoc(), operands, adaptor.getAxis());
+        rewriter, op.getLoc(), adaptor.getOperands(), adaptor.getAxis());
     addNamedAttrs(newReduce, adaptor.getAttributes());
 
     auto &newCombineOp = newReduce.getCombineOp();
@@ -725,17 +524,8 @@ struct TritonScanPattern : public OpConversionPattern<triton::ScanOp> {
   LogicalResult
   matchAndRewrite(triton::ScanOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    ValueRange operands = adaptor.getOperands();
-#ifdef __TLE__
-    SmallVector<Value> coercedOperands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(),
-            op.getOperation(), adaptor.getOperands(), coercedOperands)))
-      return failure();
-    operands = coercedOperands;
-#endif
     auto newScan =
-        triton::ScanOp::create(rewriter, op.getLoc(), operands,
+        triton::ScanOp::create(rewriter, op.getLoc(), adaptor.getOperands(),
                                adaptor.getAxis(), op.getReverse());
     addNamedAttrs(newScan, adaptor.getAttributes());
 
@@ -754,32 +544,19 @@ struct TritonMapElementwisePattern
   LogicalResult
   matchAndRewrite(triton::MapElementwiseOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-#else
     auto converter = getTypeConverter();
-#endif
     SmallVector<Type> resultTys;
 #ifdef __TLE__
-    auto err = convertTleResultTypes(converter, op.getResults(), resultTys);
+    auto err = converter->convertTypes(op.getResults(), resultTys);
 #else
     auto err = converter->convertTypes(op.getResults().getType(), resultTys);
 #endif
     if (failed(err)) {
       return err;
     }
-    ValueRange operands = adaptor.getOperands();
-#ifdef __TLE__
-    SmallVector<Value> coercedOperands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), converter, op.getOperation(),
-            adaptor.getOperands(), coercedOperands)))
-      return failure();
-    operands = coercedOperands;
-#endif
 
     auto newMapOp = triton::MapElementwiseOp::create(
-        rewriter, op.getLoc(), resultTys, operands, op.getPack());
+        rewriter, op.getLoc(), resultTys, adaptor.getOperands(), op.getPack());
     addNamedAttrs(newMapOp, adaptor.getAttributes());
 
     auto &newScalarOp = newMapOp.getScalarOp();
@@ -806,7 +583,8 @@ public:
     if (!op.getBody().empty()) {
       Block &entry = op.getBody().front();
       for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
-        Type newArgType = convertTleValueType(converter, entry.getArgument(i));
+        Type newArgType =
+            converter->convertType(entry.getArgument(i).getType());
         if (!newArgType)
           return failure();
         result.addInputs(i, newArgType);
@@ -939,11 +717,6 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
   LogicalResult
   matchAndRewrite(scf::ForOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
-#else
-    auto typeConverter = getTypeConverter();
-#endif
     auto newOp =
         cast<scf::ForOp>(rewriter.cloneWithoutRegions(*op.getOperation()));
     rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
@@ -956,51 +729,21 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
     // The entry block may have a special conversion if `entryConversion` is
     // provided. On success, the new entry block to the region is returned for
     // convenience. Otherwise, failure is returned.
-#ifdef __TLE__
-    if (failed(convertTleRegionTypes(&newOp.getRegion(), typeConverter,
-                                     rewriter))) {
-#else
-    if (failed(
-            rewriter.convertRegionTypes(&newOp.getRegion(), *typeConverter))) {
-#endif
+    if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
+                                           *getTypeConverter()))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
+    // Change the clone to use the updated operands. We could have cloned with
+    // a IRMapping, but this seems a bit more direct.
+    newOp->setOperands(adaptor.getOperands());
     // Update the result types to the new converted types.
     SmallVector<Type> newResultTypes;
-#ifdef __TLE__
-    for (OpResult result : op.getResults()) {
-      Type newType = convertTleResultType(typeConverter, result);
-#else
     for (Type type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
-#endif
       if (!newType)
         return rewriter.notifyMatchFailure(op, "not a 1:1 type conversion");
       newResultTypes.push_back(newType);
     }
-
-    // Change the clone to use the updated operands. We could have cloned with
-    // a IRMapping, but this seems a bit more direct.
-#ifdef __TLE__
-    SmallVector<Value> newOperands{adaptor.getLowerBound(),
-                                   adaptor.getUpperBound(),
-                                   adaptor.getStep()};
-    auto initArgs = adaptor.getInitArgs();
-    if (initArgs.size() != newResultTypes.size())
-      return rewriter.notifyMatchFailure(op, "invalid loop init arity");
-    for (auto [initArg, targetType] : llvm::zip(initArgs, newResultTypes)) {
-      FailureOr<Value> coerced =
-          coerceTleValueToType(rewriter, op.getLoc(), initArg, targetType);
-      if (failed(coerced))
-        return rewriter.notifyMatchFailure(op,
-                                           "could not convert init operand");
-      newOperands.push_back(*coerced);
-    }
-    newOp->setOperands(newOperands);
-#else
-    newOp->setOperands(adaptor.getOperands());
-#endif
-
     for (auto t : llvm::zip(newOp.getResults(), newResultTypes))
       std::get<0>(t).setType(std::get<1>(t));
 
@@ -1018,11 +761,6 @@ public:
   LogicalResult
   matchAndRewrite(scf::IfOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto typeConverter = getTypeConverter<TritonGPUTypeConverter>();
-#else
-    auto typeConverter = getTypeConverter();
-#endif
     // TODO: Generalize this to any type conversion, not just 1:1.
     //
     // We need to implement something more sophisticated here that tracks which
@@ -1034,13 +772,8 @@ public:
     // wrong type on the SSA values! These edge cases are also why we cannot
     // safely use the TypeConverter::convertTypes helper here.
     SmallVector<Type> newResultTypes;
-#ifdef __TLE__
-    for (OpResult result : op.getResults()) {
-      Type newType = convertTleResultType(typeConverter, result);
-#else
     for (auto type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
-#endif
       if (!newType)
         return rewriter.notifyMatchFailure(op, "not a 1:1 type conversion");
       newResultTypes.push_back(newType);
@@ -1073,49 +806,22 @@ public:
   LogicalResult
   matchAndRewrite(scf::WhileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto *converter = getTypeConverter<TritonGPUTypeConverter>();
-#else
     auto *converter = getTypeConverter();
-#endif
     assert(converter);
     SmallVector<Type> newResultTypes;
 #ifdef __TLE__
-    if (failed(
-            convertTleResultTypes(converter, op.getResults(), newResultTypes)))
+    if (failed(converter->convertTypes(op.getResults(), newResultTypes)))
 #else
     if (failed(converter->convertTypes(op.getResultTypes(), newResultTypes)))
 #endif
       return failure();
 
-#ifdef __TLE__
-    SmallVector<Value> newOperands;
-    newOperands.reserve(adaptor.getOperands().size());
-    if (adaptor.getOperands().size() != newResultTypes.size())
-      return rewriter.notifyMatchFailure(op, "invalid while operand arity");
-    for (auto [operand, targetType] :
-         llvm::zip(adaptor.getOperands(), newResultTypes)) {
-      FailureOr<Value> coerced =
-          coerceTleValueToType(rewriter, op.getLoc(), operand, targetType);
-      if (failed(coerced))
-        return rewriter.notifyMatchFailure(op,
-                                           "could not convert while operand");
-      newOperands.push_back(*coerced);
-    }
-    auto newOp =
-        scf::WhileOp::create(rewriter, op.getLoc(), newResultTypes, newOperands);
-#else
     auto newOp = scf::WhileOp::create(rewriter, op.getLoc(), newResultTypes,
                                       adaptor.getOperands());
-#endif
     for (auto i : {0u, 1u}) {
       auto &dstRegion = newOp.getRegion(i);
       rewriter.inlineRegionBefore(op.getRegion(i), dstRegion, dstRegion.end());
-#ifdef __TLE__
-      if (failed(convertTleRegionTypes(&dstRegion, converter, rewriter)))
-#else
       if (failed(rewriter.convertRegionTypes(&dstRegion, *converter)))
-#endif
         return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
     rewriter.replaceOp(op, newOp.getResults());
@@ -1129,53 +835,8 @@ public:
   LogicalResult
   matchAndRewrite(scf::ConditionOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    SmallVector<Value> newOperands;
-    newOperands.reserve(adaptor.getOperands().size());
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    for (auto [operand, original] :
-         llvm::zip(adaptor.getOperands(), op->getOperands())) {
-      Type targetType = convertTleValueType(converter, original);
-      FailureOr<Value> coerced =
-          coerceTleValueToType(rewriter, op.getLoc(), operand, targetType);
-      if (failed(coerced))
-        return rewriter.notifyMatchFailure(op,
-                                           "could not convert condition operand");
-      newOperands.push_back(*coerced);
-    }
-    rewriter.modifyOpInPlace(op, [&]() { op->setOperands(newOperands); });
-#else
     rewriter.modifyOpInPlace(op,
                              [&]() { op->setOperands(adaptor.getOperands()); });
-#endif
-    return success();
-  }
-};
-
-class SCFYieldPattern : public OpConversionPattern<scf::YieldOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-  LogicalResult
-  matchAndRewrite(scf::YieldOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    SmallVector<Value> newOperands;
-    newOperands.reserve(adaptor.getOperands().size());
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    for (auto [operand, original] :
-         llvm::zip(adaptor.getOperands(), op->getOperands())) {
-      Type targetType = convertTleValueType(converter, original);
-      FailureOr<Value> coerced =
-          coerceTleValueToType(rewriter, op.getLoc(), operand, targetType);
-      if (failed(coerced))
-        return rewriter.notifyMatchFailure(op,
-                                           "could not convert yield operand");
-      newOperands.push_back(*coerced);
-    }
-    rewriter.replaceOpWithNewOp<scf::YieldOp>(op, newOperands);
-#else
-    rewriter.replaceOpWithNewOp<scf::YieldOp>(op, adaptor.getOperands());
-#endif
     return success();
   }
 };
@@ -1183,8 +844,8 @@ public:
 void populateSCFPatterns(TritonGPUTypeConverter &typeConverter,
                          RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
-  patterns.add<SCFYieldPattern, SCFForPattern, SCFIfPattern, SCFWhilePattern,
-               SCFConditionPattern>(typeConverter, context);
+  patterns.add<GenericOpPattern<scf::YieldOp>, SCFForPattern, SCFIfPattern,
+               SCFWhilePattern, SCFConditionPattern>(typeConverter, context);
 }
 
 // CF
@@ -1196,26 +857,12 @@ public:
   LogicalResult
   matchAndRewrite(cf::BranchOp op, cf::BranchOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    SmallVector<Value> operands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), converter, op.getOperation(),
-            adaptor.getOperands(), operands)))
-      return failure();
-    auto newOp = rewriter.replaceOpWithNewOp<cf::BranchOp>(
-        op, op.getSuccessor(), operands);
-    if (failed(convertTleRegionTypes(newOp.getSuccessor()->getParent(),
-                                     converter, rewriter)))
-      return failure();
-#else
     auto converter = getTypeConverter();
     auto newOp = rewriter.replaceOpWithNewOp<cf::BranchOp>(
         op, op.getSuccessor(), adaptor.getOperands());
     if (failed(rewriter.convertRegionTypes(newOp.getSuccessor()->getParent(),
                                            *converter)))
       return failure();
-#endif
     return success();
   }
 };
@@ -1227,51 +874,6 @@ public:
   LogicalResult
   matchAndRewrite(cf::CondBranchOp op, cf::CondBranchOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#ifdef __TLE__
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    FailureOr<Value> condition = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, adaptor.getCondition(),
-        op.getCondition());
-    if (failed(condition))
-      return failure();
-    SmallVector<Value> trueOperands;
-    SmallVector<Value> falseOperands;
-    auto originalTrueOperands = op.getTrueDestOperands();
-    if (adaptor.getTrueDestOperands().size() != originalTrueOperands.size())
-      return failure();
-    trueOperands.reserve(adaptor.getTrueDestOperands().size());
-    for (auto [operand, original] :
-         llvm::zip(adaptor.getTrueDestOperands(), originalTrueOperands)) {
-      FailureOr<Value> coerced = coerceTleOperandToOriginalType(
-          rewriter, op.getLoc(), converter, operand, original);
-      if (failed(coerced))
-        return failure();
-      trueOperands.push_back(*coerced);
-    }
-    auto originalFalseOperands = op.getFalseDestOperands();
-    if (adaptor.getFalseDestOperands().size() != originalFalseOperands.size())
-      return failure();
-    falseOperands.reserve(adaptor.getFalseDestOperands().size());
-    for (auto [operand, original] :
-         llvm::zip(adaptor.getFalseDestOperands(), originalFalseOperands)) {
-      FailureOr<Value> coerced = coerceTleOperandToOriginalType(
-          rewriter, op.getLoc(), converter, operand, original);
-      if (failed(coerced))
-        return failure();
-      falseOperands.push_back(*coerced);
-    }
-    auto newOp = rewriter.replaceOpWithNewOp<cf::CondBranchOp>(
-        op, *condition, op.getTrueDest(), trueOperands, op.getFalseDest(),
-        falseOperands);
-    addNamedAttrs(newOp, adaptor.getAttributes());
-
-    if (failed(convertTleRegionTypes(newOp.getTrueDest()->getParent(),
-                                     converter, rewriter)))
-      return failure();
-    if (failed(convertTleRegionTypes(newOp.getFalseDest()->getParent(),
-                                     converter, rewriter)))
-      return failure();
-#else
     auto converter = getTypeConverter();
     auto newOp = rewriter.replaceOpWithNewOp<cf::CondBranchOp>(
         op, adaptor.getCondition(), op.getTrueDest(),
@@ -1285,7 +887,6 @@ public:
     if (failed(rewriter.convertRegionTypes(newOp.getFalseDest()->getParent(),
                                            *converter)))
       return failure();
-#endif
     return success();
   }
 };
@@ -1308,23 +909,12 @@ public:
     Region &body = op.getBody(), &newBody = newOp.getBody();
     rewriter.inlineRegionBefore(body, newBody, newBody.end());
 
-    if (failed(convertTleRegionTypes(
-            &newBody, getTypeConverter<TritonGPUTypeConverter>(), rewriter))) {
+    if (failed(rewriter.convertRegionTypes(&newBody, *getTypeConverter()))) {
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
-    SmallVector<Value> operands;
-    if (failed(coerceTleOperandsToOriginalTypes(
-            rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(),
-            op.getOperation(), adaptor.getOperands(), operands)))
-      return failure();
-    newOp->setOperands(operands);
+    newOp->setOperands(adaptor.getOperands());
     for (OpResult result : newOp->getResults()) {
-#ifdef __TLE__
-      result.setType(convertTleResultType(
-          getTypeConverter<TritonGPUTypeConverter>(), result));
-#else
       result.setType(getTypeConverter()->convertType(result.getType()));
-#endif
     }
 
     rewriter.replaceOp(op, newOp->getResults());
@@ -1339,15 +929,8 @@ public:
   LogicalResult
   matchAndRewrite(tle::ExtractTileOp op, tle::ExtractTileOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Value src = adaptor.getSrc();
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    if (failed(maybeSrc))
-      return failure();
-    src = *maybeSrc;
 
-    auto srcType = dyn_cast<RankedTensorType>(src.getType());
+    auto srcType = dyn_cast<RankedTensorType>(adaptor.getSrc().getType());
     if (!srcType) {
       return op.emitError("source must be a ranked tensor");
     }
@@ -1359,7 +942,7 @@ public:
     Type retType = op.getType().cloneWithEncoding(srcEnc);
 
     auto newOp = rewriter.replaceOpWithNewOp<tle::ExtractTileOp>(
-        op, retType, src, adaptor.getIndex());
+        op, retType, adaptor.getSrc(), adaptor.getIndex());
 
     if (auto tileShapeAttr = op->getAttr("tile_shape"))
       newOp->setAttr("tile_shape", tileShapeAttr);
@@ -1378,20 +961,8 @@ public:
   LogicalResult
   matchAndRewrite(tle::InsertTileOp op, tle::InsertTileOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Value src = adaptor.getSrc();
-    Value tile = adaptor.getTile();
-    FailureOr<Value> maybeSrc = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), src,
-        op.getSrc());
-    FailureOr<Value> maybeTile = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), getTypeConverter<TritonGPUTypeConverter>(), tile,
-        op.getTile());
-    if (failed(maybeSrc) || failed(maybeTile))
-      return failure();
-    src = *maybeSrc;
-    tile = *maybeTile;
 
-    auto srcType = dyn_cast<RankedTensorType>(src.getType());
+    auto srcType = dyn_cast<RankedTensorType>(adaptor.getSrc().getType());
     if (!srcType) {
       return op.emitError("source must be a ranked tensor");
     }
@@ -1401,7 +972,7 @@ public:
       return op.emitError("source tensor must have encoding attribute");
     }
 
-    auto tileType = dyn_cast<RankedTensorType>(tile.getType());
+    auto tileType = dyn_cast<RankedTensorType>(adaptor.getTile().getType());
     if (!tileType) {
       return op.emitError("tile must be a ranked tensor");
     }
@@ -1414,73 +985,10 @@ public:
     Type retType = op.getType().cloneWithEncoding(srcEnc);
 
     auto newOp = rewriter.replaceOpWithNewOp<tle::InsertTileOp>(
-        op, retType, src, tile, adaptor.getIndex());
+        op, retType, adaptor.getSrc(), adaptor.getTile(), adaptor.getIndex());
 
     addNamedAttrs(newOp, adaptor.getAttributes());
 
-    return success();
-  }
-};
-
-class TleWGMMAOpPattern : public OpConversionPattern<tle::WGMMAOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(tle::WGMMAOp op, tle::WGMMAOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    FailureOr<RankedTensorType> maybeRetType =
-        convertTleTensorResultTypeForOp(converter, op.getOperation(),
-                                        op.getD());
-    if (failed(maybeRetType))
-      return failure();
-
-    Value a = adaptor.getA();
-    Value b = adaptor.getB();
-    FailureOr<Value> maybeA = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, a, op.getA());
-    FailureOr<Value> maybeB = coerceTleOperandToOriginalType(
-        rewriter, op.getLoc(), converter, b, op.getB());
-    FailureOr<Value> maybeAcc = coerceTleTensorValueToType(
-        rewriter, op.getLoc(), adaptor.getC(), *maybeRetType);
-    if (failed(maybeA) || failed(maybeB) || failed(maybeAcc))
-      return failure();
-    a = *maybeA;
-    b = *maybeB;
-
-    SmallVector<Type> retTypes{*maybeRetType};
-    SmallVector<Value> operands{a, b, *maybeAcc};
-    rewriter.replaceOpWithNewOp<tle::WGMMAOp>(op, retTypes, operands,
-                                              op->getAttrs());
-    return success();
-  }
-};
-
-class TleWGMMAWaitOpPattern
-    : public OpConversionPattern<tle::WGMMAWaitOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(tle::WGMMAWaitOp op, tle::WGMMAWaitOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto converter = getTypeConverter<TritonGPUTypeConverter>();
-    FailureOr<RankedTensorType> maybeRetType =
-        convertTleTensorResultTypeForOp(converter, op.getOperation(),
-                                        op.getOutput());
-    if (failed(maybeRetType))
-      return failure();
-
-    FailureOr<Value> maybeInput = coerceTleTensorValueToType(
-        rewriter, op.getLoc(), adaptor.getInput(), *maybeRetType);
-    if (failed(maybeInput))
-      return failure();
-
-    SmallVector<Type> retTypes{*maybeRetType};
-    SmallVector<Value> operands{*maybeInput};
-    rewriter.replaceOpWithNewOp<tle::WGMMAWaitOp>(op, retTypes, operands,
-                                                  op->getAttrs());
     return success();
   }
 };
@@ -1494,7 +1002,7 @@ void populateTleRawPatterns(TritonGPUTypeConverter &typeConverter,
            TleInsertTileOpPattern, GenericOpPattern<tle::LocalPointersOp>,
            GenericOpPattern<tle::RemotePointersOp>,
            GenericOpPattern<tle::ExclusiveCumsumOp>,
-           TleWGMMAOpPattern, TleWGMMAWaitOpPattern,
+           GenericOpPattern<tle::WGMMAOp>, GenericOpPattern<tle::WGMMAWaitOp>,
            GenericOpPattern<tle::DistributedBarrierOp>,
            GenericOpPattern<tle::YieldOp>,
            GenericOpPattern<tle::ExtractAllocatedPtrOp>,
@@ -1550,6 +1058,10 @@ public:
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns))))
       return signalPassFailure();
+#ifdef __TLE__
+    if (failed(verifyNoTleWarpContextEncodings(mod)))
+      return signalPassFailure();
+#endif
   }
 };
 

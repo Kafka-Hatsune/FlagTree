@@ -2,9 +2,6 @@
 
 #include <algorithm>
 #include <numeric>
-#ifdef __TLE__
-#include <optional>
-#endif
 
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/IRMapping.h"
@@ -19,6 +16,20 @@
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
+
+#ifdef __TLE__
+static bool hasTleWarpContextEncoding(Type type) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
+    return isa_and_nonnull<triton::tle::WarpContextEncodingAttr>(
+        tensorType.getEncoding());
+  }
+
+  if (auto ptrType = dyn_cast<triton::PointerType>(type))
+    return hasTleWarpContextEncoding(ptrType.getPointeeType());
+
+  return false;
+}
+#endif
 
 //
 // TypeConverter
@@ -62,26 +73,6 @@ TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
                                     ptrType.getAddressSpace());
   });
 
-#ifdef __TLE__
-  addConversion([this](Value value) -> std::optional<Type> {
-    Type type = value.getType();
-    int valueNumWarps = getNumWarps(value);
-    if (auto tensorType = dyn_cast<RankedTensorType>(type))
-      return convertRankedTensorType(tensorType, valueNumWarps);
-
-    if (auto ptrType = dyn_cast<triton::PointerType>(type)) {
-      auto pointeeTensorType =
-          dyn_cast<RankedTensorType>(ptrType.getPointeeType());
-      if (pointeeTensorType)
-        return triton::PointerType::get(
-            convertRankedTensorType(pointeeTensorType, valueNumWarps),
-            ptrType.getAddressSpace());
-    }
-
-    return std::nullopt;
-  });
-#endif
-
   // If the origValue still has live user(s), use this to
   // convert origValue to newValue
   if (enableSourceRemat) {
@@ -105,25 +96,16 @@ TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
 }
 
 #ifdef __TLE__
-int TritonGPUTypeConverter::getNumWarps(Value value) const {
-  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
-    if (Block *owner = blockArg.getOwner()) {
-      if (Region *region = owner->getParent()) {
-        if (region->getParentOp())
-          return lookupNumWarps(region);
-      }
-    }
-  }
-  if (Operation *op = value.getDefiningOp()) {
-    if (std::optional<int> contextualNumWarps = maybeLookupNumWarps(op))
-      return *contextualNumWarps;
-  }
-  return numWarps;
-}
-
 RankedTensorType
 TritonGPUTypeConverter::convertRankedTensorType(RankedTensorType tensorType,
                                                 int contextualNumWarps) const {
+  if (auto warpContext =
+          dyn_cast_or_null<triton::tle::WarpContextEncodingAttr>(
+              tensorType.getEncoding())) {
+    contextualNumWarps = warpContext.getNumWarps();
+    tensorType = RankedTensorType::get(tensorType.getShape(),
+                                       tensorType.getElementType());
+  }
   // Types with encoding are already in the right format.
   // TODO: check for layout encodings more specifically.
   if (tensorType.getEncoding())
@@ -179,6 +161,20 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
       if (auto tensor = dyn_cast<RankedTensorType>(arg.getType())) {
         if (!tensor.getEncoding())
           return false;
+#ifdef __TLE__
+        if (hasTleWarpContextEncoding(tensor))
+          return false;
+#endif
+      }
+    }
+    for (Type type : funcOp.getFunctionType().getResults()) {
+      if (auto tensor = dyn_cast<RankedTensorType>(type)) {
+        if (!tensor.getEncoding())
+          return false;
+#ifdef __TLE__
+        if (hasTleWarpContextEncoding(tensor))
+          return false;
+#endif
       }
     }
     return true;
@@ -261,11 +257,7 @@ LogicalResult impl::convertGatherScatterOp(
     for (auto [operand, value] : llvm::zip(op->getOpOperands(), operands))
       operand.set(value);
     for (OpResult result : op->getOpResults())
-#ifdef __TLE__
-      result.setType(typeConverter.convertType(result));
-#else
       result.setType(typeConverter.convertType(result.getType()));
-#endif
     result = convertGatherScatterIndices(op, xOffsetsMutable, rewriter);
   });
   return result;

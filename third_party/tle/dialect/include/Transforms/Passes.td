@@ -34,6 +34,22 @@ def TritonTleInlineAsyncTaskHelpers
                            "mlir::triton::TritonDialect"];
 }
 
+def TritonTleStampWarpContextEncodings
+    : Pass<"triton-tle-stamp-warp-context-encodings", "mlir::ModuleOp"> {
+  let summary = "stamp TLE async_task helper tensors with warp-context marker encodings";
+
+  let description = [{
+    This pass runs immediately before ConvertTritonToTritonGPU. It marks
+    otherwise unencoded tensor types inside private synthetic async_task helper
+    functions with a temporary TLE warp-context encoding so the TritonGPU type
+    converter can assign layouts using the helper's local ``ttg.num-warps``.
+  }];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::triton::TritonDialect",
+                           "mlir::triton::tle::TleDialect"];
+}
+
 def TritonTleSelectEncodings
     : Pass<"triton-tle-select-encodings", "mlir::ModuleOp"> {
   let summary = "select shared encodings for local pointer and related users";
