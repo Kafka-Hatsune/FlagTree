@@ -567,10 +567,38 @@ public:
   LogicalResult
   matchAndRewrite(triton::FuncOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#ifdef __TLE__
+    auto converter = getTypeConverter<TritonGPUTypeConverter>();
+    TypeConverter::SignatureConversion result(op.getNumArguments());
+
+    SmallVector<Type> newArgTypes;
+    SmallVector<Type> newResultTypes;
+    if (!op.getBody().empty()) {
+      Block &entry = op.getBody().front();
+      for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
+        Type newArgType = converter->convertType(entry.getArgument(i));
+        if (!newArgType)
+          return failure();
+        result.addInputs(i, newArgType);
+        newArgTypes.push_back(newArgType);
+      }
+    } else if (failed(converter->convertTypes(
+                   op.getFunctionType().getInputs(), newArgTypes))) {
+      return failure();
+    }
+    if (failed(converter->convertTypes(op.getFunctionType().getResults(),
+                                       newResultTypes)))
+      return failure();
+
+    auto newOp = rewriter.replaceOpWithNewOp<triton::FuncOp>(
+        op, op.getName(),
+        FunctionType::get(op.getContext(), newArgTypes, newResultTypes));
+#else
     auto converter = getTypeConverter();
     TypeConverter::SignatureConversion result(op.getNumArguments());
     auto newOp = rewriter.replaceOpWithNewOp<triton::FuncOp>(
         op, op.getName(), op.getFunctionType());
+#endif
     addNamedAttrs(newOp, adaptor.getAttributes());
     rewriter.inlineRegionBefore(op.getBody(), newOp.getBody(),
                                 newOp.getBody().end());

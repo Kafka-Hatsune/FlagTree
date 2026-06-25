@@ -354,10 +354,15 @@ void CTAPlanner::processStoreLikeOps(triton::FuncOp &funcOp) {
       stores.push_back(op);
   });
   assert(stores.size() > 0 && "Cannot find store-like ops");
+#ifndef __TLE__
   auto numWarps = ttg::lookupNumWarps(funcOp);
+#endif
 
   ttg::CTAEncodingAttr CTALayout;
   for (Operation *store : stores) {
+#ifdef __TLE__
+    auto numWarps = ttg::lookupNumWarps(store);
+#endif
     auto val = [store]() -> Value {
       if (auto descStore =
               dyn_cast<triton::DescriptorStoreLikeOpInterface>(store))

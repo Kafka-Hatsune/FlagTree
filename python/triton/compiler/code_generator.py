@@ -392,6 +392,7 @@ class CodeGenerator(ast.NodeVisitor):
         self.caller_context = caller_context
         self.scf_stack = []
         self.ret_type = None
+        self._tle_async_task_helper_counter = 0
         # SSA-construction
         # name => language.tensor
         self.local_defs: Dict[str, tensor] = {}
@@ -1176,6 +1177,83 @@ class CodeGenerator(ast.NodeVisitor):
             raise TypeError(f"Unsupported async_task capture value {type(value).__name__}")
         return handles
 
+    def _make_tle_async_task_helper_name(self, task, entry_idx, replica_id):
+        raw_name = f"{self.function_name}_tle_async_task_{entry_idx}_{replica_id}_{task.name}"
+        name = re.sub(r"[^A-Za-z0-9_]", "_", raw_name)
+        if not name or not re.match(r"^[A-Za-z_]", name):
+            name = f"tle_{name}"
+        while self.module.has_function(name):
+            self._tle_async_task_helper_counter += 1
+            name = f"{name}_{self._tle_async_task_helper_counter}"
+        return name
+
+    def _unflatten_tle_capture_values(self, handles, templates):
+        values = []
+        cursor = 0
+        for template in templates:
+            if not hasattr(template, "type") or not hasattr(template.type, "_unflatten_ir"):
+                raise TypeError(f"Unsupported async_task capture value {type(template).__name__}")
+            value, cursor = template.type._unflatten_ir(handles, cursor)
+            values.append(value)
+        assert cursor == len(handles)
+        return values
+
+    def _create_tle_async_task_helper(
+        self,
+        stmt,
+        liveins,
+        capture_names,
+        task,
+        replica_id,
+        entry_idx,
+        tle_gpu_core,
+    ):
+        capture_values = [liveins[name] for name in capture_names]
+        capture_arg_types = [value.type for value in capture_values]
+        prototype = ASTFunction([], capture_arg_types, {}, {})
+        helper_name = self._make_tle_async_task_helper_name(task, entry_idx, replica_id)
+        helper_type = prototype.serialize(self.builder)
+        helper = self.builder.get_or_insert_function(self.module, helper_name, helper_type, "private", True)
+        helper.set_attr("tle.async_task.helper", self.builder.get_unit_attr())
+        self.module.push_back(helper)
+        entry = helper.add_entry_block()
+        caller_context = tle_gpu_core.WarpSpecializeCallerContext(task.num_warps)
+        caller_context.initialize_callee(helper, self.builder)
+        helper_args = self._unflatten_tle_capture_values([helper.args(i) for i in range(helper.get_num_args())],
+                                                         capture_values)
+
+        ip, loc = self._get_insertion_point_and_loc()
+        prev_fn = self.fn
+        prev_ret_type = self.ret_type
+        prev_lscope = self.lscope
+        prev_defs = self.local_defs
+        prev_caller_context = self.caller_context
+        try:
+            helper_liveins = _clone_scope(liveins)
+            for name, value in zip(capture_names, helper_args):
+                helper_liveins[name] = value
+
+            self.fn = helper
+            self.ret_type = None
+            self.lscope = helper_liveins
+            self.local_defs = {}
+            self.caller_context = caller_context
+            self.builder.set_insertion_point_to_start(entry)
+            self._visit_tle_async_task_body(stmt)
+            assert not self.builder.get_insertion_block().has_terminator()
+            self.ret_type = language.void
+            self.builder.ret([])
+            helper.finalize()
+        finally:
+            self.fn = prev_fn
+            self.ret_type = prev_ret_type
+            self.lscope = prev_lscope
+            self.local_defs = prev_defs
+            self.caller_context = prev_caller_context
+            self._set_insertion_point_and_loc(ip, loc)
+
+        return helper
+
     def _visit_tle_async_tasks(self, node):
         tle_gpu_core = self._get_tle_gpu_core()
         assert tle_gpu_core is not None
@@ -1243,6 +1321,24 @@ class CodeGenerator(ast.NodeVisitor):
             for name in capture_names:
                 capture_handles.extend(self._flatten_tle_capture_handles(liveins[name]))
 
+            self._set_insertion_point_and_loc(ip, last_loc)
+            helpers = []
+            for idx, (stmt, task, replica_id) in enumerate(consumer_entries):
+                stack.append(replica_id)
+                try:
+                    helpers.append(
+                        self._create_tle_async_task_helper(
+                            stmt,
+                            liveins,
+                            capture_names,
+                            task,
+                            replica_id,
+                            idx,
+                            tle_gpu_core,
+                        ))
+                finally:
+                    stack.pop()
+
             partition_num_warps = [task.num_warps for _, task, _ in consumer_entries]
             self._set_insertion_point_and_loc(ip, last_loc)
             ws_op = self.builder.create_warp_specialize([], capture_handles, partition_num_warps)
@@ -1267,18 +1363,7 @@ class CodeGenerator(ast.NodeVisitor):
                 region = partitions_op.get_region(idx)
                 block = self.builder.create_block_with_parent(region, capture_arg_types)
                 self.builder.set_insertion_point_to_start(block)
-                stack.append(replica_id)
-                caller_context = tle_gpu_core.WarpSpecializeCallerContext(_task.num_warps)
-                try:
-                    self._visit_tle_async_task_body_with_scope(
-                        stmt,
-                        liveins,
-                        caller_context=caller_context,
-                    )
-                finally:
-                    stack.pop()
-                for arg_idx, handle in enumerate(capture_handles):
-                    block.replace_use_in_block_with(handle, block.get_argument(arg_idx))
+                self.builder.call(helpers[idx], [block.get_argument(i) for i in range(len(capture_handles))])
                 self.builder.set_insertion_point_to_end(block)
                 self.builder.create_warp_return()
 

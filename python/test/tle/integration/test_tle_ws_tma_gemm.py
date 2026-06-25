@@ -178,7 +178,10 @@ class TestTLEAsyncTasksTmaGemm:
         c = torch.empty((block_m, block_n), device="cuda", dtype=torch.float32).contiguous()
 
         kernel = ws_tma_multi_slot_gemm(a, b, c, launch_num_warps, block_k, num_slots)
-        assert "tt.call" not in kernel.asm["ttgir"]
+        ttgir = kernel.asm["ttgir"]
+        assert "tt.call" not in ttgir
+        assert "tle_async_task" not in ttgir
+        assert "num_warps(4)" in ttgir
 
         expected = torch.matmul(a.float(), b.float())
         torch.testing.assert_close(c, expected, atol=5e-2, rtol=5e-2)

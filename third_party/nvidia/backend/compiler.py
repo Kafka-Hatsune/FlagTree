@@ -280,6 +280,7 @@ class CUDABackend(BaseBackend):
         dump_enabled = pm.enable_debug()
         emuTF32 = (capability // 10 >= 8)
         passes.ttir.add_convert_to_ttgpuir(pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
+        tle.passes.add_inline_async_task_helpers(pm)
         # flagtree tle raw
         tle.raw_passes.add_tle_convert_arg_to_memdesc(pm)
         tle.raw_passes.add_tle_remove_redundant_copy(pm)

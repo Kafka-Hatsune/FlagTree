@@ -18,6 +18,22 @@ def TritonTleEarlyAssignMemorySpace
                            "mlir::triton::tle::TleDialect"];
 }
 
+def TritonTleInlineAsyncTaskHelpers
+    : Pass<"triton-tle-inline-async-task-helpers", "mlir::ModuleOp"> {
+  let summary = "inline TLE async_task helper functions after TTGPU conversion";
+
+  let description = [{
+    This pass inlines private synthetic async_task helpers marked with
+    ``tle.async_task.helper`` back into ``ttg.warp_specialize`` partition
+    regions. It runs immediately after ConvertTritonToTritonGPU so helper body
+    layouts have already been selected using the helper's contextual
+    ``ttg.num-warps`` attribute.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
 def TritonTleSelectEncodings
     : Pass<"triton-tle-select-encodings", "mlir::ModuleOp"> {
   let summary = "select shared encodings for local pointer and related users";
