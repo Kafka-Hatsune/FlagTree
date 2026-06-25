@@ -393,6 +393,7 @@ class CodeGenerator(ast.NodeVisitor):
         self.scf_stack = []
         self.ret_type = None
         self._tle_async_task_helper_counter = 0
+        self._synthetic_arg_names = set()
         # SSA-construction
         # name => language.tensor
         self.local_defs: Dict[str, tensor] = {}
@@ -688,7 +689,11 @@ class CodeGenerator(ast.NodeVisitor):
 
     def visit_arg(self, node):
         ast.NodeVisitor.generic_visit(self, node)
-        param = next(p for p in self.jit_fn.params if p.name == node.arg)
+        param = next((p for p in self.jit_fn.params if p.name == node.arg), None)
+        if param is None:
+            if node.arg in self._synthetic_arg_names:
+                return node.arg
+            raise KeyError(f"unknown function argument {node.arg}")
         if param.is_constexpr and (param.do_not_specialize or param.do_not_specialize_on_alignment):
             raise CompilationError(
                 self.jit_fn.src, node,
@@ -1235,6 +1240,7 @@ class CodeGenerator(ast.NodeVisitor):
                                   caller_context=caller_context,
                                   is_gluon=self.is_gluon)
         generator.lscope = _clone_scope(liveins)
+        generator._synthetic_arg_names = set(capture_names)
         generator.flagtree_line_hints = self.flagtree_line_hints
         generator.visit(helper_module)
         helper = self.module.get_function(helper_name)
