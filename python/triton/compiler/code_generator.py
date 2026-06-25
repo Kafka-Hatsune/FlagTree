@@ -1144,16 +1144,19 @@ class CodeGenerator(ast.NodeVisitor):
             raise self._unsupported(stmt, "Cannot have `return` statements inside async_task regions")
         self.visit_compound_statement(stmt.body)
 
-    def _visit_tle_async_task_body_with_scope(self, stmt, liveins):
+    def _visit_tle_async_task_body_with_scope(self, stmt, liveins, caller_context=None):
         prev_lscope = self.lscope
         prev_defs = self.local_defs
+        prev_caller_context = self.caller_context
         try:
             self.lscope = _clone_scope(liveins)
             self.local_defs = {}
+            self.caller_context = caller_context or self.caller_context
             self._visit_tle_async_task_body(stmt)
         finally:
             self.lscope = prev_lscope
             self.local_defs = prev_defs
+            self.caller_context = prev_caller_context
 
     def _is_tle_capture_value(self, value):
         if _is_constexpr(value):
@@ -1219,8 +1222,15 @@ class CodeGenerator(ast.NodeVisitor):
             stack = tle_gpu_core._get_async_task_replica_id_stack()
             stack.append(-1)
             try:
-                for stmt in stmts:
-                    self._visit_tle_async_task_body_with_scope(stmt, liveins)
+                for stmt, task in zip(stmts, tasks):
+                    caller_context = None
+                    if task.is_consumer:
+                        caller_context = tle_gpu_core.WarpSpecializeCallerContext(task.num_warps)
+                    self._visit_tle_async_task_body_with_scope(
+                        stmt,
+                        liveins,
+                        caller_context=caller_context,
+                    )
             finally:
                 stack.pop()
             dry_block.erase()
@@ -1258,8 +1268,13 @@ class CodeGenerator(ast.NodeVisitor):
                 block = self.builder.create_block_with_parent(region, capture_arg_types)
                 self.builder.set_insertion_point_to_start(block)
                 stack.append(replica_id)
+                caller_context = tle_gpu_core.WarpSpecializeCallerContext(_task.num_warps)
                 try:
-                    self._visit_tle_async_task_body_with_scope(stmt, liveins)
+                    self._visit_tle_async_task_body_with_scope(
+                        stmt,
+                        liveins,
+                        caller_context=caller_context,
+                    )
                 finally:
                     stack.pop()
                 for arg_idx, handle in enumerate(capture_handles):

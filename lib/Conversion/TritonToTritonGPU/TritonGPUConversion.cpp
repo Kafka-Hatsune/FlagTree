@@ -20,6 +20,41 @@
 using namespace mlir;
 using namespace mlir::triton::gpu;
 
+#ifdef __TLE__
+namespace {
+
+std::optional<int> lookupWarpSpecializeRegionNumWarps(Region *region) {
+  for (Region *current = region; current;) {
+    Operation *parentOp = current->getParentOp();
+    if (!parentOp)
+      return std::nullopt;
+
+    if (auto partitions = dyn_cast<WarpSpecializePartitionsOp>(parentOp)) {
+      unsigned idx = current->getRegionNumber();
+      return partitions.getParentOp().getPartitionNumWarps()[idx];
+    }
+
+    current = parentOp->getParentRegion();
+  }
+  return std::nullopt;
+}
+
+std::optional<int> lookupWarpSpecializeRegionNumWarps(Value value) {
+  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (Block *owner = blockArg.getOwner())
+      return lookupWarpSpecializeRegionNumWarps(owner->getParent());
+    return std::nullopt;
+  }
+
+  if (Operation *op = value.getDefiningOp())
+    return lookupWarpSpecializeRegionNumWarps(op->getParentRegion());
+
+  return std::nullopt;
+}
+
+} // namespace
+#endif
+
 //
 // TypeConverter
 //
@@ -106,6 +141,10 @@ TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
 
 #ifdef __TLE__
 int TritonGPUTypeConverter::getNumWarps(Value value) const {
+  if (std::optional<int> partitionNumWarps =
+          lookupWarpSpecializeRegionNumWarps(value))
+    return *partitionNumWarps;
+
   if (auto blockArg = dyn_cast<BlockArgument>(value)) {
     if (Block *owner = blockArg.getOwner()) {
       if (Region *region = owner->getParent()) {

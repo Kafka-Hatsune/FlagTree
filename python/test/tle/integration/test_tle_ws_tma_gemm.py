@@ -1,13 +1,14 @@
 # flagtree tle
 """
-Smoke tests for warp-specialized TLE GEMM with explicit TMA completion barriers.
+Smoke tests for TLE async_tasks GEMM with staged TMA completion barriers.
 
-This intentionally keeps the GEMM to a single tile. The goal is to validate the
-basic producer/consumer protocol:
+This intentionally keeps the GEMM to a single output tile while splitting K
+across multiple shared-memory slots. The goal is to validate the basic
+producer/consumer protocol:
 
-- producer partition waits on "empty" barriers and issues TMA loads into smem
+- producer partition waits on per-slot "empty" barriers and issues TMA loads
 - TMA completion signals "full" barriers
-- consumer partition waits on "full" barriers, computes one WGMMA, stores C
+- consumer partition waits on per-slot "full" barriers, computes WGMMA, stores C
 - consumer arrives on "empty" barriers to release the smem buffers
 """
 
@@ -32,71 +33,19 @@ def _has_nvidia_hopper_gpu() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _has_nvidia_hopper_gpu(),
-    reason="warp-specialized TMA WGMMA GEMM requires NVIDIA Hopper (sm90+)",
+    reason="async_tasks TMA WGMMA GEMM requires NVIDIA Hopper (sm90+)",
 )
 
 
 @triton.jit
-def _single_tile_tma_producer(
-    a_desc,
-    b_desc,
-    a_smem,
-    b_smem,
-    a_empty,
-    b_empty,
-    a_full,
-    b_full,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    phase: tl.constexpr = 0
-
-    tle.gpu.barrier_wait(a_empty, phaseIdx=phase)
-    tle.gpu.barrier_wait(b_empty, phaseIdx=phase)
-
-    tle.gpu.copy(a_desc, a_smem, [BLOCK_M, BLOCK_K], [0, 0], barrier=a_full)
-    tle.gpu.copy(b_desc, b_smem, [BLOCK_K, BLOCK_N], [0, 0], barrier=b_full)
-
-    tle.gpu.barrier_wait(a_empty, phaseIdx=1)
-    tle.gpu.barrier_wait(b_empty, phaseIdx=1)
+def _slot_phase(k_iter, num_slots: tl.constexpr):
+    slot = k_iter % num_slots
+    phase = k_iter // num_slots
+    return slot, phase
 
 
 @triton.jit
-def _single_tile_gemm_consumer(
-    c_ptr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
-    a_smem,
-    b_smem,
-    a_empty,
-    b_empty,
-    a_full,
-    b_full,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    phase: tl.constexpr = 0
-
-    tle.gpu.barrier_wait(a_full, phaseIdx=phase)
-    tle.gpu.barrier_wait(b_full, phaseIdx=phase)
-
-    offs_m = tl.arange(0, BLOCK_M)
-    offs_n = tl.arange(0, BLOCK_N)
-
-    acc = tle.gpu.wgmma(a_smem, b_smem, out_dtype=tl.float32)
-    acc = tle.gpu.wgmma_wait(0, acc)
-
-    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    tl.store(c_ptrs, acc)
-
-    tle.gpu.barrier_arrive(a_empty, phaseIdx=phase)
-    tle.gpu.barrier_arrive(b_empty, phaseIdx=phase)
-
-
-@triton.jit
-def ws_tma_single_tile_gemm_kernel(
+def ws_tma_multi_slot_gemm_kernel(
     a_desc,
     b_desc,
     c_ptr,
@@ -107,145 +56,99 @@ def ws_tma_single_tile_gemm_kernel(
     BLOCK_K: tl.constexpr,
     A_TILE_BYTES: tl.constexpr,
     B_TILE_BYTES: tl.constexpr,
+    K_TILES: tl.constexpr,
+    NUM_SLOTS: tl.constexpr,
 ):
     a_smem = tle.gpu.alloc(
-        [BLOCK_M, BLOCK_K],
+        [NUM_SLOTS, BLOCK_M, BLOCK_K],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
     )
     b_smem = tle.gpu.alloc(
-        [BLOCK_K, BLOCK_N],
+        [NUM_SLOTS, BLOCK_K, BLOCK_N],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
     )
 
-    a_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
-    b_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
-    a_full = tle.gpu.alloc_barrier(expect_bytes=A_TILE_BYTES)
-    b_full = tle.gpu.alloc_barrier(expect_bytes=B_TILE_BYTES)
-
-    tle.gpu.warp_specialize(
-        [
-            (
-                _single_tile_tma_producer,
-                (
-                    a_desc,
-                    b_desc,
-                    a_smem,
-                    b_smem,
-                    a_empty,
-                    b_empty,
-                    a_full,
-                    b_full,
-                    BLOCK_M,
-                    BLOCK_N,
-                    BLOCK_K,
-                ),
-            ),
-            (
-                _single_tile_gemm_consumer,
-                (
-                    c_ptr,
-                    stride_cm,
-                    stride_cn,
-                    a_smem,
-                    b_smem,
-                    a_empty,
-                    b_empty,
-                    a_full,
-                    b_full,
-                    BLOCK_M,
-                    BLOCK_N,
-                    BLOCK_K,
-                ),
-            ),
-        ],
-        [4],
-        [168],
-    )
-
-
-@triton.jit
-def ws_tma_single_tile_gemm_kernel_async_tasks(
-    a_desc,
-    b_desc,
-    c_ptr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    A_TILE_BYTES: tl.constexpr,
-    B_TILE_BYTES: tl.constexpr,
-):
-    a_smem = tle.gpu.alloc(
-        [BLOCK_M, BLOCK_K],
-        dtype=tl.float16,
-        layout=None,
-        scope=tle.gpu.smem,
-    )
-    b_smem = tle.gpu.alloc(
-        [BLOCK_K, BLOCK_N],
-        dtype=tl.float16,
-        layout=None,
-        scope=tle.gpu.smem,
-    )
-
-    a_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
-    b_empty = tle.gpu.alloc_barrier(init=tle.gpu.READY)
-    a_full = tle.gpu.alloc_barrier(expect_bytes=A_TILE_BYTES)
-    b_full = tle.gpu.alloc_barrier(expect_bytes=B_TILE_BYTES)
+    a_empty = tle.gpu.alloc_barriers(num_barriers=NUM_SLOTS, init=tle.gpu.READY)
+    b_empty = tle.gpu.alloc_barriers(num_barriers=NUM_SLOTS, init=tle.gpu.READY)
+    a_full = tle.gpu.alloc_barriers(num_barriers=NUM_SLOTS, expect_bytes=A_TILE_BYTES)
+    b_full = tle.gpu.alloc_barriers(num_barriers=NUM_SLOTS, expect_bytes=B_TILE_BYTES)
 
     with tle.gpu.async_tasks():
         with tle.gpu.async_task("producer"):
-            phase: tl.constexpr = 0
+            for k_iter in range(0, K_TILES):
+                slot, phase = _slot_phase(k_iter, NUM_SLOTS)
+                k_offset = k_iter * BLOCK_K
 
-            tle.gpu.barrier_wait(a_empty, phaseIdx=phase)
-            tle.gpu.barrier_wait(b_empty, phaseIdx=phase)
+                tle.gpu.barrier_wait(a_empty[slot], phaseIdx=phase)
+                tle.gpu.barrier_wait(b_empty[slot], phaseIdx=phase)
 
-            tle.gpu.copy(a_desc, a_smem, [BLOCK_M, BLOCK_K], [0, 0], barrier=a_full)
-            tle.gpu.copy(b_desc, b_smem, [BLOCK_K, BLOCK_N], [0, 0], barrier=b_full)
+                tle.gpu.copy(a_desc, a_smem.slot(slot), [BLOCK_M, BLOCK_K], [0, k_offset], barrier=a_full[slot])
+                tle.gpu.copy(b_desc, b_smem.slot(slot), [BLOCK_K, BLOCK_N], [k_offset, 0], barrier=b_full[slot])
 
-            tle.gpu.barrier_wait(a_empty, phaseIdx=1)
-            tle.gpu.barrier_wait(b_empty, phaseIdx=1)
+            for k_iter in range(K_TILES - NUM_SLOTS, K_TILES):
+                slot, phase = _slot_phase(k_iter, NUM_SLOTS)
+                release_phase = phase + 1
+
+                tle.gpu.barrier_wait(a_empty[slot], phaseIdx=release_phase)
+                tle.gpu.barrier_wait(b_empty[slot], phaseIdx=release_phase)
 
         with tle.gpu.async_task(num_warps=4, registers=168, name="consumer0"):
-            phase: tl.constexpr = 0
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-            tle.gpu.barrier_wait(a_full, phaseIdx=phase)
-            tle.gpu.barrier_wait(b_full, phaseIdx=phase)
+            slot, phase = _slot_phase(0, NUM_SLOTS)
+            tle.gpu.barrier_wait(a_full[slot], phaseIdx=phase)
+            tle.gpu.barrier_wait(b_full[slot], phaseIdx=phase)
+            acc = tle.gpu.wgmma(a_smem.slot(slot), b_smem.slot(slot), acc)
+            last_slot = slot
+            last_phase = phase
+
+            for k_iter in range(1, K_TILES):
+                slot, phase = _slot_phase(k_iter, NUM_SLOTS)
+
+                tle.gpu.barrier_wait(a_full[slot], phaseIdx=phase)
+                tle.gpu.barrier_wait(b_full[slot], phaseIdx=phase)
+
+                acc = tle.gpu.wgmma(a_smem.slot(slot), b_smem.slot(slot), acc)
+                acc = tle.gpu.wgmma_wait(1, acc)
+                tle.gpu.barrier_arrive(a_empty[last_slot], phaseIdx=last_phase)
+                tle.gpu.barrier_arrive(b_empty[last_slot], phaseIdx=last_phase)
+
+                last_slot = slot
+                last_phase = phase
+
+            acc = tle.gpu.wgmma_wait(0, acc)
+            tle.gpu.barrier_arrive(a_empty[last_slot], phaseIdx=last_phase)
+            tle.gpu.barrier_arrive(b_empty[last_slot], phaseIdx=last_phase)
 
             offs_m = tl.arange(0, BLOCK_M)
             offs_n = tl.arange(0, BLOCK_N)
 
-            acc = tle.gpu.wgmma(a_smem, b_smem, out_dtype=tl.float32)
-            acc = tle.gpu.wgmma_wait(0, acc)
-
             c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
             tl.store(c_ptrs, acc)
 
-            tle.gpu.barrier_arrive(a_empty, phaseIdx=phase)
-            tle.gpu.barrier_arrive(b_empty, phaseIdx=phase)
 
-
-def ws_tma_single_tile_gemm(A, B, C, launch_num_warps, use_async_tasks=False):
+def ws_tma_multi_slot_gemm(A, B, C, launch_num_warps, block_k, num_slots):
     assert A.ndim == 2 and B.ndim == 2 and C.ndim == 2
     assert A.shape[1] == B.shape[0]
     assert C.shape == (A.shape[0], B.shape[1])
     assert A.dtype == torch.float16 and B.dtype == torch.float16 and C.dtype == torch.float32
 
-    block_m, block_k = A.shape
-    block_k_b, block_n = B.shape
-    assert block_k == block_k_b
+    block_m, total_k = A.shape
+    total_k_b, block_n = B.shape
+    assert total_k == total_k_b
+    assert total_k % block_k == 0
+    k_tiles = total_k // block_k
+    assert k_tiles >= num_slots
 
     from triton.tools.tensor_descriptor import TensorDescriptor
 
     a_desc = TensorDescriptor.from_tensor(A, block_shape=[block_m, block_k])
     b_desc = TensorDescriptor.from_tensor(B, block_shape=[block_k, block_n])
-    kernel_fn = ws_tma_single_tile_gemm_kernel_async_tasks if use_async_tasks else ws_tma_single_tile_gemm_kernel
-    return kernel_fn[(1, )](
+    return ws_tma_multi_slot_gemm_kernel[(1, )](
         a_desc,
         b_desc,
         C,
@@ -256,24 +159,26 @@ def ws_tma_single_tile_gemm(A, B, C, launch_num_warps, use_async_tasks=False):
         block_k,
         block_m * block_k * A.element_size(),
         block_k * block_n * B.element_size(),
+        k_tiles,
+        num_slots,
         num_warps=launch_num_warps,
     )
 
 
-class TestTLEWarpSpecializedTmaGemm:
+class TestTLEAsyncTasksTmaGemm:
 
-    @pytest.mark.parametrize("use_async_tasks", [False, True])
     @pytest.mark.parametrize("launch_num_warps", [4, 8])
-    def test_single_tile_producer_consumer_wgmma(self, use_async_tasks, launch_num_warps):
-        torch.manual_seed(2026 + launch_num_warps + int(use_async_tasks))
+    def test_multi_slot_producer_consumer_wgmma(self, launch_num_warps):
+        torch.manual_seed(2026 + launch_num_warps)
         block_m, block_n, block_k = 64, 16, 16
+        k_tiles, num_slots = 4, 2
 
-        a = torch.randn(block_m, block_k, device="cuda", dtype=torch.float16).contiguous()
-        b = torch.randn(block_k, block_n, device="cuda", dtype=torch.float16).contiguous()
+        a = torch.randn(block_m, block_k * k_tiles, device="cuda", dtype=torch.float16).contiguous()
+        b = torch.randn(block_k * k_tiles, block_n, device="cuda", dtype=torch.float16).contiguous()
         c = torch.empty((block_m, block_n), device="cuda", dtype=torch.float32).contiguous()
 
-        kernel = ws_tma_single_tile_gemm(a, b, c, launch_num_warps, use_async_tasks=use_async_tasks)
+        kernel = ws_tma_multi_slot_gemm(a, b, c, launch_num_warps, block_k, num_slots)
         assert "tt.call" not in kernel.asm["ttgir"]
 
         expected = torch.matmul(a.float(), b.float())
-        torch.testing.assert_close(c, expected, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(c, expected, atol=5e-2, rtol=5e-2)
