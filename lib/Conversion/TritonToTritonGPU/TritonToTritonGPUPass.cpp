@@ -898,6 +898,36 @@ void populateCFPatterns(TritonGPUTypeConverter &typeConverter,
 }
 
 #ifdef __TLE__
+template <class Op, class AdaptorGetOperandType>
+struct TleTypesMatchOpPattern : public OpConversionPattern<Op> {
+  using OpConversionPattern<Op>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(Op op, typename Op::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> retTypes{
+        AdaptorGetOperandType::get(adaptor).getType()};
+    rewriter.replaceOpWithNewOp<Op>(op, retTypes, adaptor.getOperands(),
+                                    op->getAttrs());
+    return success();
+  }
+};
+
+struct TleWGMMAAccumulatorType {
+  static Value get(tle::WGMMAOp::Adaptor adaptor) { return adaptor.getC(); }
+};
+
+struct TleWGMMAWaitInputType {
+  static Value get(tle::WGMMAWaitOp::Adaptor adaptor) {
+    return adaptor.getInput();
+  }
+};
+
+using TleWGMMAOpPattern =
+    TleTypesMatchOpPattern<tle::WGMMAOp, TleWGMMAAccumulatorType>;
+using TleWGMMAWaitOpPattern =
+    TleTypesMatchOpPattern<tle::WGMMAWaitOp, TleWGMMAWaitInputType>;
+
 class TleDSLRegionOpPattern : public OpConversionPattern<tle::DSLRegionOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -1002,7 +1032,7 @@ void populateTleRawPatterns(TritonGPUTypeConverter &typeConverter,
            TleInsertTileOpPattern, GenericOpPattern<tle::LocalPointersOp>,
            GenericOpPattern<tle::RemotePointersOp>,
            GenericOpPattern<tle::ExclusiveCumsumOp>,
-           GenericOpPattern<tle::WGMMAOp>, GenericOpPattern<tle::WGMMAWaitOp>,
+           TleWGMMAOpPattern, TleWGMMAWaitOpPattern,
            GenericOpPattern<tle::DistributedBarrierOp>,
            GenericOpPattern<tle::YieldOp>,
            GenericOpPattern<tle::ExtractAllocatedPtrOp>,
