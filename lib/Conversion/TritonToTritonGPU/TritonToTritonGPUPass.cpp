@@ -34,12 +34,30 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
 }
 
 #ifdef __TLE__
+static Type convertTleValueType(const TritonGPUTypeConverter *converter,
+                                Value value) {
+  assert(converter && "expected a TritonGPU type converter");
+  Type type = value.getType();
+  int contextualNumWarps = converter->getNumWarps(value);
+  if (auto tensorType = dyn_cast<RankedTensorType>(type))
+    return converter->convertRankedTensorType(tensorType, contextualNumWarps);
+
+  if (auto ptrType = dyn_cast<triton::PointerType>(type)) {
+    auto pointeeTensorType =
+        dyn_cast<RankedTensorType>(ptrType.getPointeeType());
+    if (pointeeTensorType)
+      return triton::PointerType::get(
+          converter->convertRankedTensorType(pointeeTensorType,
+                                             contextualNumWarps),
+          ptrType.getAddressSpace());
+  }
+
+  return converter->convertType(type);
+}
+
 static Type convertTleResultType(const TritonGPUTypeConverter *converter,
                                  Value result) {
-  assert(converter && "expected a TritonGPU type converter");
-  if (Type resultType = converter->convertType(result))
-    return resultType;
-  return converter->convertType(result.getType());
+  return convertTleValueType(converter, result);
 }
 
 static LogicalResult
@@ -64,7 +82,7 @@ convertTleRegionTypes(Region *region, const TritonGPUTypeConverter *converter,
   Block &entry = region->front();
   TypeConverter::SignatureConversion conversion(entry.getNumArguments());
   for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
-    Type newArgType = converter->convertType(entry.getArgument(i));
+    Type newArgType = convertTleValueType(converter, entry.getArgument(i));
     if (!newArgType)
       return failure();
     conversion.addInputs(i, newArgType);
@@ -588,7 +606,7 @@ public:
     if (!op.getBody().empty()) {
       Block &entry = op.getBody().front();
       for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
-        Type newArgType = converter->convertType(entry.getArgument(i));
+        Type newArgType = convertTleValueType(converter, entry.getArgument(i));
         if (!newArgType)
           return failure();
         result.addInputs(i, newArgType);
