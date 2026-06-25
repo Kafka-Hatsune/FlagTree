@@ -33,6 +33,31 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
       op->setAttr(attr.getName(), attr.getValue());
 }
 
+#ifdef __TLE__
+static bool isInWarpSpecializePartition(OpResult result) {
+  Operation *owner = result.getOwner();
+  return owner && owner->getParentOfType<WarpSpecializePartitionsOp>();
+}
+
+static Type convertTleResultType(TypeConverter *converter, OpResult result) {
+  return isInWarpSpecializePartition(result)
+             ? converter->convertType(result)
+             : converter->convertType(result.getType());
+}
+
+static LogicalResult convertTleResultTypes(TypeConverter *converter,
+                                           ResultRange results,
+                                           SmallVectorImpl<Type> &resultTypes) {
+  for (OpResult result : results) {
+    Type resultType = convertTleResultType(converter, result);
+    if (!resultType)
+      return failure();
+    resultTypes.push_back(resultType);
+  }
+  return success();
+}
+#endif
+
 template <class Op> struct GenericOpPattern : public OpConversionPattern<Op> {
   using OpConversionPattern<Op>::OpConversionPattern;
 
@@ -41,13 +66,14 @@ template <class Op> struct GenericOpPattern : public OpConversionPattern<Op> {
                   ConversionPatternRewriter &rewriter) const override {
     SmallVector<Type> retTypes;
 #ifdef __TLE__
-    if (failed(
-            this->getTypeConverter()->convertTypes(op->getResults(), retTypes)))
+    if (failed(convertTleResultTypes(this->getTypeConverter(), op->getResults(),
+                                     retTypes)))
+      return failure();
 #else
     if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
                                                       retTypes)))
-#endif
       return failure();
+#endif
     rewriter.replaceOpWithNewOp<Op>(op, retTypes, adaptor.getOperands(),
                                     op->getAttrs());
 
@@ -64,7 +90,7 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Type retType =
 #ifdef __TLE__
-        getTypeConverter()->convertType(op.getResult());
+        convertTleResultType(getTypeConverter(), op.getResult());
 #else
         getTypeConverter()->convertType(op.getType());
 #endif
@@ -307,7 +333,7 @@ struct TritonCatPattern : public OpConversionPattern<triton::CatOp> {
     // will evolve when we add support for `can_reorder=False`.
     auto retType = cast<RankedTensorType>(
 #ifdef __TLE__
-        this->getTypeConverter()->convertType(op.getResult()));
+        convertTleResultType(this->getTypeConverter(), op.getResult()));
 #else
         this->getTypeConverter()->convertType(op.getType()));
 #endif
@@ -503,7 +529,7 @@ struct TritonMapElementwisePattern
     auto converter = getTypeConverter();
     SmallVector<Type> resultTys;
 #ifdef __TLE__
-    auto err = converter->convertTypes(op.getResults(), resultTys);
+    auto err = convertTleResultTypes(converter, op.getResults(), resultTys);
 #else
     auto err = converter->convertTypes(op.getResults().getType(), resultTys);
 #endif
@@ -666,8 +692,8 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
     // Update the result types to the new converted types.
     SmallVector<Type> newResultTypes;
 #ifdef __TLE__
-    for (Value result : op.getResults()) {
-      Type newType = typeConverter->convertType(result);
+    for (OpResult result : op.getResults()) {
+      Type newType = convertTleResultType(typeConverter, result);
 #else
     for (Type type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
@@ -705,8 +731,8 @@ public:
     // safely use the TypeConverter::convertTypes helper here.
     SmallVector<Type> newResultTypes;
 #ifdef __TLE__
-    for (Value result : op.getResults()) {
-      Type newType = typeConverter->convertType(result);
+    for (OpResult result : op.getResults()) {
+      Type newType = convertTleResultType(typeConverter, result);
 #else
     for (auto type : op.getResultTypes()) {
       Type newType = typeConverter->convertType(type);
@@ -747,7 +773,8 @@ public:
     assert(converter);
     SmallVector<Type> newResultTypes;
 #ifdef __TLE__
-    if (failed(converter->convertTypes(op.getResults(), newResultTypes)))
+    if (failed(
+            convertTleResultTypes(converter, op.getResults(), newResultTypes)))
 #else
     if (failed(converter->convertTypes(op.getResultTypes(), newResultTypes)))
 #endif
@@ -852,7 +879,7 @@ public:
     newOp->setOperands(adaptor.getOperands());
     for (OpResult result : newOp->getResults()) {
 #ifdef __TLE__
-      result.setType(getTypeConverter()->convertType(result));
+      result.setType(convertTleResultType(getTypeConverter(), result));
 #else
       result.setType(getTypeConverter()->convertType(result.getType()));
 #endif
