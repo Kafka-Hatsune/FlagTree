@@ -1,5 +1,9 @@
 #include "tle/dialect/include/IR/Dialect.h"
+
+#include "mlir/IR/DialectImplementation.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/TypeSwitch.h"
+
 #include "tle/dialect/include/IR/Dialect.cpp.inc"
 
 #define GET_ATTRDEF_CLASSES
