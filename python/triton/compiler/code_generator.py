@@ -1187,17 +1187,6 @@ class CodeGenerator(ast.NodeVisitor):
             name = f"{name}_{self._tle_async_task_helper_counter}"
         return name
 
-    def _unflatten_tle_capture_values(self, handles, templates):
-        values = []
-        cursor = 0
-        for template in templates:
-            if not hasattr(template, "type") or not hasattr(template.type, "_unflatten_ir"):
-                raise TypeError(f"Unsupported async_task capture value {type(template).__name__}")
-            value, cursor = template.type._unflatten_ir(handles, cursor)
-            values.append(value)
-        assert cursor == len(handles)
-        return values
-
     def _create_tle_async_task_helper(
         self,
         stmt,
@@ -1208,50 +1197,48 @@ class CodeGenerator(ast.NodeVisitor):
         entry_idx,
         tle_gpu_core,
     ):
+        if ContainsReturnChecker(self.gscope).visit(stmt):
+            raise self._unsupported(stmt, "Cannot have `return` statements inside async_task regions")
         capture_values = [liveins[name] for name in capture_names]
         capture_arg_types = [value.type for value in capture_values]
         prototype = ASTFunction([], capture_arg_types, {}, {})
         helper_name = self._make_tle_async_task_helper_name(task, entry_idx, replica_id)
-        helper_type = prototype.serialize(self.builder)
-        helper = self.builder.get_or_insert_function(self.module, helper_name, helper_type, "private", True)
-        self.module.push_back(helper)
-        helper.set_attr("tle_async_task_helper", self.builder.get_unit_attr())
-        entry = helper.add_entry_block()
         caller_context = tle_gpu_core.WarpSpecializeCallerContext(task.num_warps)
-        caller_context.initialize_callee(helper, self.builder)
-        helper_args = self._unflatten_tle_capture_values([helper.args(i) for i in range(helper.get_num_args())],
-                                                         capture_values)
 
-        ip, loc = self._get_insertion_point_and_loc()
-        prev_fn = self.fn
-        prev_ret_type = self.ret_type
-        prev_lscope = self.lscope
-        prev_defs = self.local_defs
-        prev_caller_context = self.caller_context
-        try:
-            helper_liveins = _clone_scope(liveins)
-            for name, value in zip(capture_names, helper_args):
-                helper_liveins[name] = value
-
-            self.fn = helper
-            self.ret_type = None
-            self.lscope = helper_liveins
-            self.local_defs = {}
-            self.caller_context = caller_context
-            self.builder.set_insertion_point_to_start(entry)
-            self._visit_tle_async_task_body(stmt)
-            assert not self.builder.get_insertion_block().has_terminator()
-            self.ret_type = language.void
-            self.builder.ret([])
-            helper.finalize()
-        finally:
-            self.fn = prev_fn
-            self.ret_type = prev_ret_type
-            self.lscope = prev_lscope
-            self.local_defs = prev_defs
-            self.caller_context = prev_caller_context
-            self._set_insertion_point_and_loc(ip, loc)
-
+        args = ast.arguments(posonlyargs=[],
+                             args=[ast.arg(arg=name, annotation=None) for name in capture_names],
+                             kwonlyargs=[],
+                             kw_defaults=[],
+                             defaults=[])
+        helper_def = ast.FunctionDef(name=helper_name,
+                                     args=args,
+                                     body=copy.deepcopy(stmt.body),
+                                     decorator_list=[],
+                                     returns=None,
+                                     type_comment=None,
+                                     type_params=[])
+        helper_def = ast.copy_location(helper_def, stmt)
+        helper_module = ast.fix_missing_locations(ast.Module(body=[helper_def], type_ignores=[]))
+        generator = CodeGenerator(self.context,
+                                  prototype,
+                                  self.gscope,
+                                  module=self.module,
+                                  jit_fn=self.jit_fn,
+                                  function_name=helper_name,
+                                  function_types=self.function_ret_types,
+                                  noinline=True,
+                                  file_name=self.file_name,
+                                  begin_line=self.begin_line + 1,
+                                  options=self.builder.options,
+                                  codegen_fns=self.builder.codegen_fns,
+                                  module_map=self.builder.module_map,
+                                  caller_context=caller_context,
+                                  is_gluon=self.is_gluon)
+        generator.lscope = _clone_scope(liveins)
+        generator.flagtree_line_hints = self.flagtree_line_hints
+        generator.visit(helper_module)
+        helper = self.module.get_function(helper_name)
+        helper.set_attr("tle_async_task_helper", self.builder.get_unit_attr())
         return helper
 
     def _visit_tle_async_tasks(self, node):
