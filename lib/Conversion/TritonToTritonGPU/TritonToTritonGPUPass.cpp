@@ -34,18 +34,12 @@ static void addNamedAttrs(Operation *op, DictionaryAttr dictAttrs) {
 }
 
 #ifdef __TLE__
-static bool
-needsTleContextualResultType(const TritonGPUTypeConverter *converter,
-                             Value result) {
-  assert(converter && "expected a TritonGPU type converter");
-  return converter->getNumWarps(result) != converter->getNumWarps();
-}
-
 static Type convertTleResultType(const TritonGPUTypeConverter *converter,
                                  Value result) {
-  return needsTleContextualResultType(converter, result)
-             ? converter->convertType(result)
-             : converter->convertType(result.getType());
+  assert(converter && "expected a TritonGPU type converter");
+  if (Type resultType = converter->convertType(result))
+    return resultType;
+  return converter->convertType(result.getType());
 }
 
 static LogicalResult
@@ -58,6 +52,24 @@ convertTleResultTypes(const TritonGPUTypeConverter *converter,
     resultTypes.push_back(resultType);
   }
   return success();
+}
+
+static LogicalResult
+convertTleRegionTypes(Region *region, const TritonGPUTypeConverter *converter,
+                      ConversionPatternRewriter &rewriter) {
+  assert(converter && "expected a TritonGPU type converter");
+  if (region->empty())
+    return success();
+
+  Block &entry = region->front();
+  TypeConverter::SignatureConversion conversion(entry.getNumArguments());
+  for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
+    Type newArgType = converter->convertType(entry.getArgument(i));
+    if (!newArgType)
+      return failure();
+    conversion.addInputs(i, newArgType);
+  }
+  return rewriter.convertRegionTypes(region, *converter, &conversion);
 }
 #endif
 
@@ -726,8 +738,13 @@ struct SCFForPattern : public OpConversionPattern<scf::ForOp> {
     // The entry block may have a special conversion if `entryConversion` is
     // provided. On success, the new entry block to the region is returned for
     // convenience. Otherwise, failure is returned.
+#ifdef __TLE__
+    if (failed(convertTleRegionTypes(&newOp.getRegion(), typeConverter,
+                                     rewriter))) {
+#else
     if (failed(
             rewriter.convertRegionTypes(&newOp.getRegion(), *typeConverter))) {
+#endif
       return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
     // Change the clone to use the updated operands. We could have cloned with
@@ -838,7 +855,11 @@ public:
     for (auto i : {0u, 1u}) {
       auto &dstRegion = newOp.getRegion(i);
       rewriter.inlineRegionBefore(op.getRegion(i), dstRegion, dstRegion.end());
+#ifdef __TLE__
+      if (failed(convertTleRegionTypes(&dstRegion, converter, rewriter)))
+#else
       if (failed(rewriter.convertRegionTypes(&dstRegion, *converter)))
+#endif
         return rewriter.notifyMatchFailure(op, "could not convert body types");
     }
     rewriter.replaceOp(op, newOp.getResults());
