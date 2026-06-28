@@ -31,6 +31,52 @@ def _wgmma_wait_trigger_kernel():
     tle.gpu.wgmma_wait(0, acc)
 
 
+@triton.jit
+def _ws_call_default(out):
+    tl.store(out, 1)
+
+
+@triton.jit
+def _ws_call_worker(out):
+    tl.store(out, 2)
+
+
+@triton.jit
+def _warp_specialize_call_lower_kernel(out):
+    tle.gpu.warp_specialize(
+        [
+            (_ws_call_default, (out, )),
+            (_ws_call_worker, (out, )),
+        ],
+        [4],
+        [168],
+    )
+
+
+@triton.jit
+def _ws_barrier_default(bar):
+    tle.gpu.barrier_arrive(bar, phaseIdx=0)
+
+
+@triton.jit
+def _ws_barrier_worker(bar, out):
+    tle.gpu.barrier_wait(bar, phaseIdx=0)
+    tl.store(out, 1)
+
+
+@triton.jit
+def _warp_specialize_user_promise_inline_kernel(out):
+    bar = tle.gpu.alloc_barrier()
+    tle.gpu.warp_specialize(
+        [
+            (_ws_barrier_default, (bar, )),
+            (_ws_barrier_worker, (bar, out)),
+        ],
+        [4],
+        [168],
+    )
+
+
 def _make_ttir(kernel, signature=None):
     target = GPUTarget("cuda", 90, 32)
     backend = make_backend(target)
@@ -63,3 +109,21 @@ def test_tle_wgmma_pipeline_route_marker_exact_api_list(kernel, signature, route
 
     assert (_WGMMA_PIPELINE_MODE_ATTR in ttir) is routes_user_promise
     assert (_USER_PROMISE_MODE in ttir) is routes_user_promise
+
+
+def test_tle_warp_specialize_keeps_call_lowering_without_user_promise_marker():
+    ttir = _make_ttir(_warp_specialize_call_lower_kernel, {"out": "*i32"})
+
+    assert "ttg.warp_specialize" in ttir
+    assert "tt.call" in ttir
+    assert _WGMMA_PIPELINE_MODE_ATTR not in ttir
+    assert _USER_PROMISE_MODE not in ttir
+
+
+def test_tle_warp_specialize_inlines_with_user_promise_marker():
+    ttir = _make_ttir(_warp_specialize_user_promise_inline_kernel, {"out": "*i32"})
+
+    assert "ttg.warp_specialize" in ttir
+    assert _WGMMA_PIPELINE_MODE_ATTR in ttir
+    assert _USER_PROMISE_MODE in ttir
+    assert "tt.call" not in ttir
