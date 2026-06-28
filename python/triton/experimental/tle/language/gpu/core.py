@@ -20,6 +20,7 @@ SHARED_MEMORY_ADDRESS_SPACE = 3
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
 _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG = "_tle_wgmma_user_promise"
+_WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG = "_tle_wgmma_user_promise"
 
 _async_task_state = threading.local()
 
@@ -29,9 +30,18 @@ def _mark_wgmma_user_promise(_semantic, _generator):
         return
     setattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
     setattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
+    setattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
+    setattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
     _generator.module.set_attr(
         _WGMMA_PIPELINE_MODE_ATTR,
         _semantic.builder.get_string_attr(_WGMMA_PIPELINE_MODE_USER_PROMISE),
+    )
+
+
+def _is_wgmma_user_promise_marked(_generator):
+    return bool(
+        getattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
+        or getattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
     )
 
 
