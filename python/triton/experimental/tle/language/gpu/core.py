@@ -19,6 +19,7 @@ SHARED_MEMORY_ADDRESS_SPACE = 3
 
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
+_WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG = "_tle_wgmma_user_promise"
 
 _async_task_state = threading.local()
 
@@ -26,9 +27,18 @@ _async_task_state = threading.local()
 def _mark_wgmma_user_promise(_semantic, _generator):
     if _generator is None or _semantic is None:
         return
+    setattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
+    setattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
     _generator.module.set_attr(
         _WGMMA_PIPELINE_MODE_ATTR,
         _semantic.builder.get_string_attr(_WGMMA_PIPELINE_MODE_USER_PROMISE),
+    )
+
+
+def _is_wgmma_user_promise_marked(_generator):
+    return bool(
+        getattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
+        or getattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
     )
 
 
@@ -213,14 +223,19 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
 
     builder = _semantic.builder
     insert_pt = builder.get_insertion_point()
+    lower_jit_function = (
+        _generator.inline_JitFunction
+        if _is_wgmma_user_promise_marked(_generator) else _generator.call_JitFunction
+    )
 
     default_fn, default_args = functions_and_args[0]
     default_args = _as_call_args(default_args)
     default_block = builder.new_block()
     builder.set_insertion_point_to_start(default_block)
-    default_results = _generator.call_JitFunction(default_fn, default_args, kwargs={})
+    default_results = lower_jit_function(default_fn, default_args, kwargs={})
     default_result_values = _as_result_values(default_results)
     default_result_handles = flatten_values_to_ir(default_result_values)
+    builder.set_insertion_point_to_end(default_block)
     builder.create_warp_yield(default_result_handles)
     result_types = [result.get_type() for result in default_result_handles]
 
@@ -244,7 +259,8 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
         block_args = [block.get_argument(remapped[j]) for j in builtins.range(len(flattened))]
         block_values = tuple(unflatten_ir_values(block_args, [arg.type for arg in worker_args]))
         caller_context = WarpSpecializeCallerContext(worker_num_warps[idx])
-        _generator.call_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
+        lower_jit_function(worker_fn, block_values, kwargs={}, caller_context=caller_context)
+        builder.set_insertion_point_to_end(block)
         builder.create_warp_return()
 
     builder.set_insertion_point_after(ws_op.get_operation())
