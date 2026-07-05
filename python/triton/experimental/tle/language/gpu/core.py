@@ -229,14 +229,12 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
 
     default_fn, default_args = functions_and_args[0]
     default_args = _as_call_args(default_args)
-    default_block = builder.create_block() if inline_user_promise else builder.new_block()
+    default_block = builder.create_block()
     builder.set_insertion_point_to_start(default_block)
     default_results = call_jit_function(default_fn, default_args, kwargs={})
     default_result_values = _as_result_values(default_results)
     default_result_handles = flatten_values_to_ir(default_result_values)
     builder.set_insertion_point_to_end(default_block)
-    if not inline_user_promise:
-        builder.create_warp_yield(default_result_handles)
     result_types = [result.get_type() for result in default_result_handles]
 
     worker_items = []
@@ -248,14 +246,11 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
 
     builder.restore_insertion_point(insert_pt)
     ws_op = builder.create_warp_specialize(result_types, worker_arg_handles, worker_num_warps)
-    if inline_user_promise:
-        real_default_block = builder.create_block_with_parent(ws_op.get_default_region(), [])
-        default_block.merge_block_before(real_default_block)
-        default_block = real_default_block
-        builder.set_insertion_point_to_end(default_block)
-        builder.create_warp_yield(default_result_handles)
-    else:
-        ws_op.get_default_region().push_back(default_block)
+    real_default_block = builder.create_block_with_parent(ws_op.get_default_region(), [])
+    default_block.merge_block_before(real_default_block)
+    default_block = real_default_block
+    builder.set_insertion_point_to_end(default_block)
+    builder.create_warp_yield(default_result_handles)
     ws_op.set_requested_registers(worker_num_regs)
 
     builder.create_block_with_parent(ws_op.get_partition_op_holder(), [])
