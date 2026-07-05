@@ -50,6 +50,251 @@ def _compute_offsets(tile_idx, H, N_CTX, BLOCK_M: tl.constexpr):
 
 
 @triton.jit
+def _attn_fwd_tle_ws_pipelined_pingpong_producer(
+    Z,
+    H,
+    desc_q,
+    desc_k,
+    desc_v,
+    N_CTX,
+    q_smem,
+    k_smem,
+    v_smem,
+    q_empties,
+    q_fulls,
+    k_empties,
+    k_fulls,
+    v_empties,
+    v_fulls,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS_Q: tl.constexpr,
+    NUM_BUFFERS_KV: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+):
+    prog_id = tl.program_id(0)
+    num_progs = tl.num_programs(0)
+    num_pid_m = tl.cdiv(N_CTX, BLOCK_M)
+    total_tiles = num_pid_m * Z * H
+
+    tile_idx = prog_id
+    tile_count = 0
+    accum_cnt_kv = 0
+    while tile_idx < total_tiles:
+        start_m, off_hz, qo_offset_y, kv_offset_y = _compute_offsets(tile_idx, H, N_CTX, BLOCK_M)
+
+        q_buf, q_phase_idx = _buf_phase(tile_count, NUM_BUFFERS_Q)
+        q0_idx = q_buf
+        q1_idx = q_buf + NUM_BUFFERS_Q
+
+        tle.gpu.barrier_wait(q_empties[q0_idx], phaseIdx=q_phase_idx)
+        tle.gpu.copy(
+            desc_q,
+            q_smem.slot(q0_idx),
+            [BM_SPLIT, HEAD_DIM],
+            [qo_offset_y, 0],
+            barrier=q_fulls[q0_idx],
+        )
+
+        kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
+        tle.gpu.barrier_wait(k_empties[kv_buf], phaseIdx=kv_phase_idx)
+        tle.gpu.copy(
+            desc_k,
+            k_smem.slot(kv_buf),
+            [BLOCK_N, HEAD_DIM],
+            [kv_offset_y, 0],
+            barrier=k_fulls[kv_buf],
+        )
+
+        tle.gpu.barrier_wait(q_empties[q1_idx], phaseIdx=q_phase_idx)
+        tle.gpu.copy(
+            desc_q,
+            q_smem.slot(q1_idx),
+            [BM_SPLIT, HEAD_DIM],
+            [qo_offset_y + BM_SPLIT, 0],
+            barrier=q_fulls[q1_idx],
+        )
+
+        tle.gpu.barrier_wait(v_empties[kv_buf], phaseIdx=kv_phase_idx)
+        tle.gpu.copy(
+            desc_v,
+            v_smem.slot(kv_buf),
+            [BLOCK_N, HEAD_DIM],
+            [kv_offset_y, 0],
+            barrier=v_fulls[kv_buf],
+        )
+        accum_cnt_kv += 1
+
+        for kv_idx in range(BLOCK_N, N_CTX, BLOCK_N):
+            kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
+            kv_offset = kv_offset_y + kv_idx
+
+            tle.gpu.barrier_wait(k_empties[kv_buf], phaseIdx=kv_phase_idx)
+            tle.gpu.copy(
+                desc_k,
+                k_smem.slot(kv_buf),
+                [BLOCK_N, HEAD_DIM],
+                [kv_offset, 0],
+                barrier=k_fulls[kv_buf],
+            )
+
+            tle.gpu.barrier_wait(v_empties[kv_buf], phaseIdx=kv_phase_idx)
+            tle.gpu.copy(
+                desc_v,
+                v_smem.slot(kv_buf),
+                [BLOCK_N, HEAD_DIM],
+                [kv_offset, 0],
+                barrier=v_fulls[kv_buf],
+            )
+            accum_cnt_kv += 1
+
+        tile_idx += num_progs
+        tile_count += 1
+
+
+@triton.jit
+def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
+    sm_scale,
+    m_ptr,
+    Z,
+    H,
+    desc_o,
+    N_CTX,
+    q_smem,
+    k_smem,
+    v_smem,
+    q_empties,
+    q_fulls,
+    k_empties,
+    k_fulls,
+    v_empties,
+    v_fulls,
+    ping_to_c0,
+    ping_to_c1,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS_Q: tl.constexpr,
+    NUM_BUFFERS_KV: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+    CID: tl.constexpr,
+):
+    prog_id = tl.program_id(0)
+    num_progs = tl.num_programs(0)
+    num_pid_m = tl.cdiv(N_CTX, BLOCK_M)
+    total_tiles = num_pid_m * Z * H
+
+    if CID == 1:
+        tle.gpu.barrier_arrive(ping_to_c0)
+
+    tile_idx = prog_id
+    tile_count = 0
+    accum_cnt_kv = 0
+    while tile_idx < total_tiles:
+        start_m, off_hz, qo_offset_y, kv_offset_y = _compute_offsets(tile_idx, H, N_CTX, BLOCK_M)
+
+        m_i = tl.zeros([BM_SPLIT], dtype=tl.float32) - float("inf")
+        l_i = tl.zeros([BM_SPLIT], dtype=tl.float32) + 1.0
+        acc = tl.zeros([BM_SPLIT, HEAD_DIM], dtype=tl.float32)
+        qk_scale = sm_scale * 1.44269504
+
+        q_buf, q_phase_idx = _buf_phase(tile_count, NUM_BUFFERS_Q)
+        q_idx = q_buf + CID * NUM_BUFFERS_Q
+        tle.gpu.barrier_wait(q_fulls[q_idx], phaseIdx=q_phase_idx)
+
+        kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
+        tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
+
+        if CID == 0:
+            tle.gpu.barrier_wait(ping_to_c0)
+        else:
+            tle.gpu.barrier_wait(ping_to_c1)
+        qk = tle.gpu.wgmma(
+            q_smem.slot(q_idx),
+            k_smem.slot(kv_buf),
+            out_dtype=tl.float32,
+            trans_b=True,
+        )
+        if CID == 0:
+            tle.gpu.barrier_arrive(ping_to_c1)
+        else:
+            tle.gpu.barrier_arrive(ping_to_c0)
+        qk = tle.gpu.wgmma_wait(0, qk)
+        tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
+
+        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+        qk = qk * qk_scale - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_ij = tl.sum(p, 1)
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+        accum_cnt_kv += 1
+
+        for _ in range(BLOCK_N, N_CTX, BLOCK_N):
+            kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
+            tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
+
+            if CID == 0:
+                tle.gpu.barrier_wait(ping_to_c0)
+            else:
+                tle.gpu.barrier_wait(ping_to_c1)
+            qk = tle.gpu.wgmma(
+                q_smem.slot(q_idx),
+                k_smem.slot(kv_buf),
+                out_dtype=tl.float32,
+                trans_b=True,
+            )
+            if CID == 0:
+                tle.gpu.barrier_arrive(ping_to_c1)
+            else:
+                tle.gpu.barrier_arrive(ping_to_c0)
+
+            v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
+            tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
+            acc = tle.gpu.wgmma(p.to(tl.float16), v_smem.slot(v_buf), acc)
+
+            qk = tle.gpu.wgmma_wait(1, qk)
+            tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
+
+            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
+            p = tl.math.exp2(qk)
+            alpha = tl.math.exp2(m_i - m_ij)
+            l_ij = tl.sum(p, 1)
+            l_i = l_i * alpha + l_ij
+            m_i = m_ij
+
+            acc = tle.gpu.wgmma_wait(0, acc)
+            tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
+            acc = acc * alpha[:, None]
+            accum_cnt_kv += 1
+
+        v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
+        tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
+        acc = tle.gpu.wgmma(p.to(tl.float16), v_smem.slot(v_buf), acc)
+
+        acc = tle.gpu.wgmma_wait(1, acc)
+        tle.gpu.barrier_arrive(q_empties[q_idx], phaseIdx=q_phase_idx)
+
+        acc = tle.gpu.wgmma_wait(0, acc)
+        tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
+
+        m_i += tl.math.log2(l_i)
+        acc = acc / l_i[:, None]
+
+        offs_m = start_m * BLOCK_M + CID * BM_SPLIT + tl.arange(0, BM_SPLIT)
+        m_ptrs = m_ptr + off_hz * N_CTX + offs_m
+        tl.store(m_ptrs, m_i)
+
+        desc_o.store((qo_offset_y + CID * BM_SPLIT, 0), acc.to(tl.float16))
+
+        tile_idx += num_progs
+        tile_count += 1
+
+
+@triton.jit
 def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
     sm_scale,
     M,
@@ -124,206 +369,97 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
     ping_to_c0 = pingpong[0]
     ping_to_c1 = pingpong[1]
 
-    with tle.gpu.async_tasks():
-        with tle.gpu.async_task("producer"):
-            prog_id = tl.program_id(0)
-            num_progs = tl.num_programs(0)
-            num_pid_m = tl.cdiv(N_CTX, BLOCK_M)
-            total_tiles = num_pid_m * Z * H
-
-            tile_idx = prog_id
-            tile_count = 0
-            accum_cnt_kv = 0
-            while tile_idx < total_tiles:
-                start_m, off_hz, qo_offset_y, kv_offset_y = _compute_offsets(tile_idx, H, N_CTX, BLOCK_M)
-
-                q_buf, q_phase_idx = _buf_phase(tile_count, NUM_BUFFERS_Q)
-                q0_idx = q_buf
-                q1_idx = q_buf + NUM_BUFFERS_Q
-
-                tle.gpu.barrier_wait(q_empties[q0_idx], phaseIdx=q_phase_idx)
-                tle.gpu.copy(
+    mma_warps: tl.constexpr = NUM_MMA_WARPS // NUM_MMA_GROUPS
+    tle.gpu.warp_specialize(
+        [
+            (
+                _attn_fwd_tle_ws_pipelined_pingpong_producer,
+                (
+                    Z,
+                    H,
                     desc_q,
-                    q_smem.slot(q0_idx),
-                    [BM_SPLIT, HEAD_DIM],
-                    [qo_offset_y, 0],
-                    barrier=q_fulls[q0_idx],
-                )
-
-                kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
-                tle.gpu.barrier_wait(k_empties[kv_buf], phaseIdx=kv_phase_idx)
-                tle.gpu.copy(
                     desc_k,
-                    k_smem.slot(kv_buf),
-                    [BLOCK_N, HEAD_DIM],
-                    [kv_offset_y, 0],
-                    barrier=k_fulls[kv_buf],
-                )
-
-                tle.gpu.barrier_wait(q_empties[q1_idx], phaseIdx=q_phase_idx)
-                tle.gpu.copy(
-                    desc_q,
-                    q_smem.slot(q1_idx),
-                    [BM_SPLIT, HEAD_DIM],
-                    [qo_offset_y + BM_SPLIT, 0],
-                    barrier=q_fulls[q1_idx],
-                )
-
-                tle.gpu.barrier_wait(v_empties[kv_buf], phaseIdx=kv_phase_idx)
-                tle.gpu.copy(
                     desc_v,
-                    v_smem.slot(kv_buf),
-                    [BLOCK_N, HEAD_DIM],
-                    [kv_offset_y, 0],
-                    barrier=v_fulls[kv_buf],
-                )
-                accum_cnt_kv += 1
-
-                for kv_idx in range(BLOCK_N, N_CTX, BLOCK_N):
-                    kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
-                    kv_offset = kv_offset_y + kv_idx
-
-                    tle.gpu.barrier_wait(k_empties[kv_buf], phaseIdx=kv_phase_idx)
-                    tle.gpu.copy(
-                        desc_k,
-                        k_smem.slot(kv_buf),
-                        [BLOCK_N, HEAD_DIM],
-                        [kv_offset, 0],
-                        barrier=k_fulls[kv_buf],
-                    )
-
-                    tle.gpu.barrier_wait(v_empties[kv_buf], phaseIdx=kv_phase_idx)
-                    tle.gpu.copy(
-                        desc_v,
-                        v_smem.slot(kv_buf),
-                        [BLOCK_N, HEAD_DIM],
-                        [kv_offset, 0],
-                        barrier=v_fulls[kv_buf],
-                    )
-                    accum_cnt_kv += 1
-
-                tile_idx += num_progs
-                tile_count += 1
-
-        with tle.gpu.async_task(
-                num_warps=NUM_MMA_WARPS // NUM_MMA_GROUPS,
-                registers=232,
-                replicate=NUM_MMA_GROUPS,
-                name="mma",
-        ):
-            cid: tl.constexpr = tle.gpu.async_task_replica_id()
-            prog_id = tl.program_id(0)
-            num_progs = tl.num_programs(0)
-            num_pid_m = tl.cdiv(N_CTX, BLOCK_M)
-            total_tiles = num_pid_m * Z * H
-
-            if cid == 1:
-                tle.gpu.barrier_arrive(ping_to_c0)
-
-            tile_idx = prog_id
-            tile_count = 0
-            accum_cnt_kv = 0
-            while tile_idx < total_tiles:
-                start_m, off_hz, qo_offset_y, kv_offset_y = _compute_offsets(tile_idx, H, N_CTX, BLOCK_M)
-
-                m_i = tl.zeros([BM_SPLIT], dtype=tl.float32) - float("inf")
-                l_i = tl.zeros([BM_SPLIT], dtype=tl.float32) + 1.0
-                acc = tl.zeros([BM_SPLIT, HEAD_DIM], dtype=tl.float32)
-                qk_scale = sm_scale * 1.44269504
-
-                q_buf, q_phase_idx = _buf_phase(tile_count, NUM_BUFFERS_Q)
-                q_idx = q_buf + cid * NUM_BUFFERS_Q
-                tle.gpu.barrier_wait(q_fulls[q_idx], phaseIdx=q_phase_idx)
-
-                kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
-                tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
-
-                if cid == 0:
-                    tle.gpu.barrier_wait(ping_to_c0)
-                else:
-                    tle.gpu.barrier_wait(ping_to_c1)
-                qk = tle.gpu.wgmma(
-                    q_smem.slot(q_idx),
-                    k_smem.slot(kv_buf),
-                    out_dtype=tl.float32,
-                    trans_b=True,
-                )
-                if cid == 0:
-                    tle.gpu.barrier_arrive(ping_to_c1)
-                else:
-                    tle.gpu.barrier_arrive(ping_to_c0)
-                qk = tle.gpu.wgmma_wait(0, qk)
-                tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
-
-                m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-                qk = qk * qk_scale - m_ij[:, None]
-                p = tl.math.exp2(qk)
-                alpha = tl.math.exp2(m_i - m_ij)
-                l_ij = tl.sum(p, 1)
-                l_i = l_i * alpha + l_ij
-                m_i = m_ij
-                accum_cnt_kv += 1
-
-                for _ in range(BLOCK_N, N_CTX, BLOCK_N):
-                    kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
-                    tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
-
-                    if cid == 0:
-                        tle.gpu.barrier_wait(ping_to_c0)
-                    else:
-                        tle.gpu.barrier_wait(ping_to_c1)
-                    qk = tle.gpu.wgmma(
-                        q_smem.slot(q_idx),
-                        k_smem.slot(kv_buf),
-                        out_dtype=tl.float32,
-                        trans_b=True,
-                    )
-                    if cid == 0:
-                        tle.gpu.barrier_arrive(ping_to_c1)
-                    else:
-                        tle.gpu.barrier_arrive(ping_to_c0)
-
-                    v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
-                    tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
-                    acc = tle.gpu.wgmma(p.to(tl.float16), v_smem.slot(v_buf), acc)
-
-                    qk = tle.gpu.wgmma_wait(1, qk)
-                    tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
-
-                    m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-                    qk = qk * qk_scale - m_ij[:, None]
-                    p = tl.math.exp2(qk)
-                    alpha = tl.math.exp2(m_i - m_ij)
-                    l_ij = tl.sum(p, 1)
-                    l_i = l_i * alpha + l_ij
-                    m_i = m_ij
-
-                    acc = tle.gpu.wgmma_wait(0, acc)
-                    tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
-                    acc = acc * alpha[:, None]
-                    accum_cnt_kv += 1
-
-                v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
-                tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
-                acc = tle.gpu.wgmma(p.to(tl.float16), v_smem.slot(v_buf), acc)
-
-                acc = tle.gpu.wgmma_wait(1, acc)
-                tle.gpu.barrier_arrive(q_empties[q_idx], phaseIdx=q_phase_idx)
-
-                acc = tle.gpu.wgmma_wait(0, acc)
-                tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
-
-                m_i += tl.math.log2(l_i)
-                acc = acc / l_i[:, None]
-
-                offs_m = start_m * BLOCK_M + cid * BM_SPLIT + tl.arange(0, BM_SPLIT)
-                m_ptrs = M + off_hz * N_CTX + offs_m
-                tl.store(m_ptrs, m_i)
-
-                desc_o.store((qo_offset_y + cid * BM_SPLIT, 0), acc.to(tl.float16))
-
-                tile_idx += num_progs
-                tile_count += 1
+                    N_CTX,
+                    q_smem,
+                    k_smem,
+                    v_smem,
+                    q_empties,
+                    q_fulls,
+                    k_empties,
+                    k_fulls,
+                    v_empties,
+                    v_fulls,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    NUM_BUFFERS_Q,
+                    NUM_BUFFERS_KV,
+                    BM_SPLIT,
+                ),
+            ),
+            (
+                _attn_fwd_tle_ws_pipelined_pingpong_consumer,
+                (
+                    sm_scale,
+                    M,
+                    Z,
+                    H,
+                    desc_o,
+                    N_CTX,
+                    q_smem,
+                    k_smem,
+                    v_smem,
+                    q_empties,
+                    q_fulls,
+                    k_empties,
+                    k_fulls,
+                    v_empties,
+                    v_fulls,
+                    ping_to_c0,
+                    ping_to_c1,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    NUM_BUFFERS_Q,
+                    NUM_BUFFERS_KV,
+                    BM_SPLIT,
+                    0,
+                ),
+            ),
+            (
+                _attn_fwd_tle_ws_pipelined_pingpong_consumer,
+                (
+                    sm_scale,
+                    M,
+                    Z,
+                    H,
+                    desc_o,
+                    N_CTX,
+                    q_smem,
+                    k_smem,
+                    v_smem,
+                    q_empties,
+                    q_fulls,
+                    k_empties,
+                    k_fulls,
+                    v_empties,
+                    v_fulls,
+                    ping_to_c0,
+                    ping_to_c1,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    NUM_BUFFERS_Q,
+                    NUM_BUFFERS_KV,
+                    BM_SPLIT,
+                    1,
+                ),
+            ),
+        ],
+        [mma_warps, mma_warps],
+        [232, 232],
+    )
 
 
 def tle_attention(
