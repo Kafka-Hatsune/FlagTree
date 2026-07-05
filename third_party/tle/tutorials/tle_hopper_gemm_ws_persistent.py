@@ -55,6 +55,302 @@ def _buf_phase(count, num_stages: tl.constexpr):
 
 
 @triton.jit
+def _tle_ws_persistent_gemm_producer(
+    a_desc,
+    b_desc,
+    a_smem,
+    b_smem,
+    empty_a,
+    empty_b,
+    full_a,
+    full_b,
+    M,
+    N,
+    K,
+    NUM_SMS: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+):
+    sm_id = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BM)
+    num_pid_n = tl.cdiv(N, BN)
+    num_tiles = num_pid_m * num_pid_n
+
+    tile_id = sm_id
+    smem_count = 0
+    while tile_id < num_tiles:
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
+        off_m = pid_m * BM
+        off_n = pid_n * BN
+
+        for k_iter in range(0, tl.cdiv(K, BK)):
+            buf, phase = _buf_phase(smem_count, NUM_STAGES)
+            off_k = k_iter * BK
+
+            a0_idx = buf
+            a1_idx = buf + NUM_STAGES
+
+            tle.gpu.barrier_wait(empty_a[a0_idx], phaseIdx=phase)
+            tle.gpu.copy(
+                a_desc,
+                a_smem.slot(a0_idx),
+                [BM_SPLIT, BK],
+                [off_m, off_k],
+                barrier=full_a[a0_idx],
+            )
+
+            tle.gpu.barrier_wait(empty_b[buf], phaseIdx=phase)
+            tle.gpu.copy(
+                b_desc,
+                b_smem.slot(buf),
+                [BK, BN],
+                [off_k, off_n],
+                barrier=full_b[buf],
+            )
+
+            tle.gpu.barrier_wait(empty_a[a1_idx], phaseIdx=phase)
+            tle.gpu.copy(
+                a_desc,
+                a_smem.slot(a1_idx),
+                [BM_SPLIT, BK],
+                [off_m + BM_SPLIT, off_k],
+                barrier=full_a[a1_idx],
+            )
+
+            smem_count += 1
+
+        tile_id += NUM_SMS
+
+
+@triton.jit
+def _tle_ws_persistent_gemm_consumer(
+    a_smem,
+    b_smem,
+    empty_a,
+    empty_b,
+    full_a,
+    full_b,
+    c_desc,
+    M,
+    N,
+    K,
+    NUM_SMS: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+    WGMMA_PIPELINE: tl.constexpr,
+    CID: tl.constexpr,
+):
+    sm_id = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BM)
+    num_pid_n = tl.cdiv(N, BN)
+    num_tiles = num_pid_m * num_pid_n
+
+    tile_id = sm_id
+    smem_count = 0
+    while tile_id < num_tiles:
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
+        off_m = pid_m * BM + CID * BM_SPLIT
+        off_n = pid_n * BN
+
+        acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
+        if WGMMA_PIPELINE:
+            buf, phase = _buf_phase(smem_count, NUM_STAGES)
+            a_idx = buf + CID * NUM_STAGES
+
+            tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+            tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+            acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+
+            last_buf = buf
+            last_phase = phase
+            last_a_idx = a_idx
+            smem_count += 1
+
+            for k_iter in range(1, tl.cdiv(K, BK)):
+                buf, phase = _buf_phase(smem_count, NUM_STAGES)
+                a_idx = buf + CID * NUM_STAGES
+
+                tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+                tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+                acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+                acc = tle.gpu.wgmma_wait(1, acc)
+
+                tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
+                tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
+                last_buf = buf
+                last_phase = phase
+                last_a_idx = a_idx
+                smem_count += 1
+
+            acc = tle.gpu.wgmma_wait(0, acc)
+            tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
+            tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
+        else:
+            for k_iter in range(0, tl.cdiv(K, BK)):
+                buf, phase = _buf_phase(smem_count, NUM_STAGES)
+                a_idx = buf + CID * NUM_STAGES
+
+                tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+                tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+
+                acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+                acc = tle.gpu.wgmma_wait(0, acc)
+
+                tle.gpu.barrier_arrive(empty_a[a_idx], phaseIdx=phase)
+                tle.gpu.barrier_arrive(empty_b[buf], phaseIdx=phase)
+                smem_count += 1
+
+        c_desc.store((off_m, off_n), acc.to(tl.float16))
+        tile_id += NUM_SMS
+
+
+@triton.jit
+def _tle_ws_nonpersistent_gemm_producer(
+    a_desc,
+    b_desc,
+    a_smem,
+    b_smem,
+    empty_a,
+    empty_b,
+    full_a,
+    full_b,
+    M,
+    N,
+    K,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+):
+    tile_id = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BM)
+    num_pid_n = tl.cdiv(N, BN)
+    pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
+    off_m = pid_m * BM
+    off_n = pid_n * BN
+
+    for k_iter in range(0, tl.cdiv(K, BK)):
+        buf, phase = _buf_phase(k_iter, NUM_STAGES)
+        off_k = k_iter * BK
+
+        a0_idx = buf
+        a1_idx = buf + NUM_STAGES
+
+        tle.gpu.barrier_wait(empty_a[a0_idx], phaseIdx=phase)
+        tle.gpu.copy(
+            a_desc,
+            a_smem.slot(a0_idx),
+            [BM_SPLIT, BK],
+            [off_m, off_k],
+            barrier=full_a[a0_idx],
+        )
+
+        tle.gpu.barrier_wait(empty_b[buf], phaseIdx=phase)
+        tle.gpu.copy(
+            b_desc,
+            b_smem.slot(buf),
+            [BK, BN],
+            [off_k, off_n],
+            barrier=full_b[buf],
+        )
+
+        tle.gpu.barrier_wait(empty_a[a1_idx], phaseIdx=phase)
+        tle.gpu.copy(
+            a_desc,
+            a_smem.slot(a1_idx),
+            [BM_SPLIT, BK],
+            [off_m + BM_SPLIT, off_k],
+            barrier=full_a[a1_idx],
+        )
+
+
+@triton.jit
+def _tle_ws_nonpersistent_gemm_consumer(
+    a_smem,
+    b_smem,
+    empty_a,
+    empty_b,
+    full_a,
+    full_b,
+    c_desc,
+    M,
+    N,
+    K,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+    BM_SPLIT: tl.constexpr,
+    WGMMA_PIPELINE: tl.constexpr,
+    CID: tl.constexpr,
+):
+    tile_id = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BM)
+    num_pid_n = tl.cdiv(N, BN)
+    pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
+    off_m = pid_m * BM + CID * BM_SPLIT
+    off_n = pid_n * BN
+
+    acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
+    if WGMMA_PIPELINE:
+        buf, phase = _buf_phase(0, NUM_STAGES)
+        a_idx = buf + CID * NUM_STAGES
+
+        tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+        tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+        acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+
+        last_buf = buf
+        last_phase = phase
+        last_a_idx = a_idx
+
+        for k_iter in range(1, tl.cdiv(K, BK)):
+            buf, phase = _buf_phase(k_iter, NUM_STAGES)
+            a_idx = buf + CID * NUM_STAGES
+
+            tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+            tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+            acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+            acc = tle.gpu.wgmma_wait(1, acc)
+
+            tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
+            tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
+            last_buf = buf
+            last_phase = phase
+            last_a_idx = a_idx
+
+        acc = tle.gpu.wgmma_wait(0, acc)
+        tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
+        tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
+    else:
+        for k_iter in range(0, tl.cdiv(K, BK)):
+            buf, phase = _buf_phase(k_iter, NUM_STAGES)
+            a_idx = buf + CID * NUM_STAGES
+
+            tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
+            tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
+
+            acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
+            acc = tle.gpu.wgmma_wait(0, acc)
+
+            tle.gpu.barrier_arrive(empty_a[a_idx], phaseIdx=phase)
+            tle.gpu.barrier_arrive(empty_b[buf], phaseIdx=phase)
+
+    c_desc.store((off_m, off_n), acc.to(tl.float16))
+
+
+@triton.jit
 def _tle_ws_persistent_gemm_kernel(
     a_desc,
     b_desc,
@@ -101,122 +397,83 @@ def _tle_ws_persistent_gemm_kernel(
         expect_bytes=BK * BN * 2,
     )
 
-    with tle.gpu.async_tasks():
-        with tle.gpu.async_task("producer"):
-            sm_id = tl.program_id(0)
-            num_pid_m = tl.cdiv(M, BM)
-            num_pid_n = tl.cdiv(N, BN)
-            num_tiles = num_pid_m * num_pid_n
-
-            tile_id = sm_id
-            smem_count = 0
-            while tile_id < num_tiles:
-                pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-                off_m = pid_m * BM
-                off_n = pid_n * BN
-
-                for k_iter in range(0, tl.cdiv(K, BK)):
-                    buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                    off_k = k_iter * BK
-
-                    a0_idx = buf
-                    a1_idx = buf + NUM_STAGES
-
-                    tle.gpu.barrier_wait(empty_a[a0_idx], phaseIdx=phase)
-                    tle.gpu.copy(
-                        a_desc,
-                        a_smem.slot(a0_idx),
-                        [BM_SPLIT, BK],
-                        [off_m, off_k],
-                        barrier=full_a[a0_idx],
-                    )
-
-                    tle.gpu.barrier_wait(empty_b[buf], phaseIdx=phase)
-                    tle.gpu.copy(
-                        b_desc,
-                        b_smem.slot(buf),
-                        [BK, BN],
-                        [off_k, off_n],
-                        barrier=full_b[buf],
-                    )
-
-                    tle.gpu.barrier_wait(empty_a[a1_idx], phaseIdx=phase)
-                    tle.gpu.copy(
-                        a_desc,
-                        a_smem.slot(a1_idx),
-                        [BM_SPLIT, BK],
-                        [off_m + BM_SPLIT, off_k],
-                        barrier=full_a[a1_idx],
-                    )
-
-                    smem_count += 1
-
-                tile_id += NUM_SMS
-
-        with tle.gpu.async_task(num_warps=4, registers=168, replicate=2, name="mma"):
-            cid: tl.constexpr = tle.gpu.async_task_replica_id()
-            sm_id = tl.program_id(0)
-            num_pid_m = tl.cdiv(M, BM)
-            num_pid_n = tl.cdiv(N, BN)
-            num_tiles = num_pid_m * num_pid_n
-
-            tile_id = sm_id
-            smem_count = 0
-            while tile_id < num_tiles:
-                pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-                off_m = pid_m * BM + cid * BM_SPLIT
-                off_n = pid_n * BN
-
-                acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
-                if WGMMA_PIPELINE:
-                    buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                    a_idx = buf + cid * NUM_STAGES
-
-                    tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                    tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-                    acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-
-                    last_buf = buf
-                    last_phase = phase
-                    last_a_idx = a_idx
-                    smem_count += 1
-
-                    for k_iter in range(1, tl.cdiv(K, BK)):
-                        buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                        a_idx = buf + cid * NUM_STAGES
-
-                        tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                        tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-                        acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-                        acc = tle.gpu.wgmma_wait(1, acc)
-
-                        tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
-                        tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
-                        last_buf = buf
-                        last_phase = phase
-                        last_a_idx = a_idx
-                        smem_count += 1
-
-                    acc = tle.gpu.wgmma_wait(0, acc)
-                    tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
-                    tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
-                else:
-                    for k_iter in range(0, tl.cdiv(K, BK)):
-                        buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                        a_idx = buf + cid * NUM_STAGES
-
-                        tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                        tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-
-                        acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-                        acc = tle.gpu.wgmma_wait(0, acc)
-
-                        tle.gpu.barrier_arrive(empty_a[a_idx], phaseIdx=phase)
-                        tle.gpu.barrier_arrive(empty_b[buf], phaseIdx=phase)
-                        smem_count += 1
-
-                c_desc.store((off_m, off_n), acc.to(tl.float16))
-                tile_id += NUM_SMS
+    tle.gpu.warp_specialize(
+        [
+            (
+                _tle_ws_persistent_gemm_producer,
+                (
+                    a_desc,
+                    b_desc,
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    M,
+                    N,
+                    K,
+                    NUM_SMS,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                ),
+            ),
+            (
+                _tle_ws_persistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    NUM_SMS,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    0,
+                ),
+            ),
+            (
+                _tle_ws_persistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    NUM_SMS,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    1,
+                ),
+            ),
+        ],
+        [4, 4],
+        [168, 168],
+    )
 
 
 @triton.jit
@@ -264,104 +521,80 @@ def _tle_ws_nonpersistent_gemm_kernel(
         expect_bytes=BK * BN * 2,
     )
 
-    with tle.gpu.async_tasks():
-        with tle.gpu.async_task("producer"):
-            tile_id = tl.program_id(0)
-            num_pid_m = tl.cdiv(M, BM)
-            num_pid_n = tl.cdiv(N, BN)
-            pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-            off_m = pid_m * BM
-            off_n = pid_n * BN
-
-            for k_iter in range(0, tl.cdiv(K, BK)):
-                buf, phase = _buf_phase(k_iter, NUM_STAGES)
-                off_k = k_iter * BK
-
-                a0_idx = buf
-                a1_idx = buf + NUM_STAGES
-
-                tle.gpu.barrier_wait(empty_a[a0_idx], phaseIdx=phase)
-                tle.gpu.copy(
+    tle.gpu.warp_specialize(
+        [
+            (
+                _tle_ws_nonpersistent_gemm_producer,
+                (
                     a_desc,
-                    a_smem.slot(a0_idx),
-                    [BM_SPLIT, BK],
-                    [off_m, off_k],
-                    barrier=full_a[a0_idx],
-                )
-
-                tle.gpu.barrier_wait(empty_b[buf], phaseIdx=phase)
-                tle.gpu.copy(
                     b_desc,
-                    b_smem.slot(buf),
-                    [BK, BN],
-                    [off_k, off_n],
-                    barrier=full_b[buf],
-                )
-
-                tle.gpu.barrier_wait(empty_a[a1_idx], phaseIdx=phase)
-                tle.gpu.copy(
-                    a_desc,
-                    a_smem.slot(a1_idx),
-                    [BM_SPLIT, BK],
-                    [off_m + BM_SPLIT, off_k],
-                    barrier=full_a[a1_idx],
-                )
-
-        with tle.gpu.async_task(num_warps=4, registers=168, replicate=2, name="mma"):
-            cid: tl.constexpr = tle.gpu.async_task_replica_id()
-            tile_id = tl.program_id(0)
-            num_pid_m = tl.cdiv(M, BM)
-            num_pid_n = tl.cdiv(N, BN)
-            pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-            off_m = pid_m * BM + cid * BM_SPLIT
-            off_n = pid_n * BN
-
-            acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
-            if WGMMA_PIPELINE:
-                buf, phase = _buf_phase(0, NUM_STAGES)
-                a_idx = buf + cid * NUM_STAGES
-
-                tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-                acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-
-                last_buf = buf
-                last_phase = phase
-                last_a_idx = a_idx
-
-                for k_iter in range(1, tl.cdiv(K, BK)):
-                    buf, phase = _buf_phase(k_iter, NUM_STAGES)
-                    a_idx = buf + cid * NUM_STAGES
-
-                    tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                    tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-                    acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-                    acc = tle.gpu.wgmma_wait(1, acc)
-
-                    tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
-                    tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
-                    last_buf = buf
-                    last_phase = phase
-                    last_a_idx = a_idx
-
-                acc = tle.gpu.wgmma_wait(0, acc)
-                tle.gpu.barrier_arrive(empty_a[last_a_idx], phaseIdx=last_phase)
-                tle.gpu.barrier_arrive(empty_b[last_buf], phaseIdx=last_phase)
-            else:
-                for k_iter in range(0, tl.cdiv(K, BK)):
-                    buf, phase = _buf_phase(k_iter, NUM_STAGES)
-                    a_idx = buf + cid * NUM_STAGES
-
-                    tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
-                    tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
-
-                    acc = tle.gpu.wgmma(a_smem.slot(a_idx), b_smem.slot(buf), acc)
-                    acc = tle.gpu.wgmma_wait(0, acc)
-
-                    tle.gpu.barrier_arrive(empty_a[a_idx], phaseIdx=phase)
-                    tle.gpu.barrier_arrive(empty_b[buf], phaseIdx=phase)
-
-            c_desc.store((off_m, off_n), acc.to(tl.float16))
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    M,
+                    N,
+                    K,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                ),
+            ),
+            (
+                _tle_ws_nonpersistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    0,
+                ),
+            ),
+            (
+                _tle_ws_nonpersistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    1,
+                ),
+            ),
+        ],
+        [4, 4],
+        [168, 168],
+    )
 
 
 def tle_ws_persistent_matmul(
@@ -779,7 +1012,7 @@ def run_tle_compare_variant(
     cuda_graph: bool = False,
 ) -> dict[str, object]:
     split = "persistent_split_m" if persistent else "nonpersistent_split_m"
-    variant = f"flagtree.tle.async_tasks.{split}.{cfg.label()}"
+    variant = f"flagtree.tle.warp_specialize.{split}.{cfg.label()}"
     matmul_fn = tle_ws_persistent_matmul if persistent else tle_ws_nonpersistent_matmul
     try:
         c, kernel = matmul_fn(
@@ -1073,7 +1306,7 @@ def main() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
         raise RuntimeError("Hopper or newer CUDA GPU is required")
     if args.producer_num_warps % 4 != 0:
-        parser.error("--producer-num-warps must be a multiple of 4 for TLE warp-specialized async_tasks")
+        parser.error("--producer-num-warps must be a multiple of 4 for TLE warp_specialize")
 
     problems = args.shape or [Problem(4096, 4096, 4096), Problem(8192, 8192, 512)]
     if args.compare:
@@ -1160,8 +1393,8 @@ def main() -> None:
             )[0]
 
         ms, p20, p80 = bench_ms(run, args.warmup, args.rep, cuda_graph=args.cuda_graph)
-        variant = "flagtree.tle.async_tasks.nonpersistent_split_m" if args.non_persistent else \
-            "flagtree.tle.async_tasks.persistent_split_m"
+        variant = "flagtree.tle.warp_specialize.nonpersistent_split_m" if args.non_persistent else \
+            "flagtree.tle.warp_specialize.persistent_split_m"
         problem_rows.append(
             make_row(
                 variant,
