@@ -20,7 +20,6 @@ SHARED_MEMORY_ADDRESS_SPACE = 3
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
 _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG = "_tle_wgmma_user_promise"
-_WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG = "_tle_wgmma_user_promise"
 
 _async_task_state = threading.local()
 
@@ -28,9 +27,6 @@ _async_task_state = threading.local()
 def _mark_wgmma_user_promise(_semantic, _generator):
     if _generator is None or _semantic is None:
         return
-    setattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
-    setattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
-    setattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
     setattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, True)
     _generator.module.set_attr(
         _WGMMA_PIPELINE_MODE_ATTR,
@@ -39,17 +35,9 @@ def _mark_wgmma_user_promise(_semantic, _generator):
 
 
 def _is_wgmma_user_promise_marked(_generator):
-    return bool(
-        getattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
-        or getattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
-    )
-
-
-def _is_wgmma_user_promise_marked(_generator):
-    return bool(
-        getattr(_generator, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
-        or getattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False)
-    )
+    if _generator is None:
+        return False
+    return bool(getattr(_generator.module, _WGMMA_PIPELINE_MODE_USER_PROMISE_FLAG, False))
 
 
 def _get_async_task_replica_id_stack():
@@ -234,9 +222,21 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     builder = _semantic.builder
     insert_pt = builder.get_insertion_point()
     inline_user_promise = _is_wgmma_user_promise_marked(_generator)
+    if inline_user_promise:
+        call_jit_function = _generator.inline_JitFunction
+    else:
+        call_jit_function = _generator.call_JitFunction
 
     default_fn, default_args = functions_and_args[0]
     default_args = _as_call_args(default_args)
+    default_block = builder.new_block()
+    builder.set_insertion_point_to_start(default_block)
+    default_results = call_jit_function(default_fn, default_args, kwargs={})
+    default_result_values = _as_result_values(default_results)
+    default_result_handles = flatten_values_to_ir(default_result_values)
+    builder.set_insertion_point_to_end(default_block)
+    builder.create_warp_yield(default_result_handles)
+    result_types = [result.get_type() for result in default_result_handles]
 
     worker_items = []
     for worker_fn, worker_args in functions_and_args[1:]:
@@ -244,44 +244,6 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
         flattened = flatten_values_to_ir(worker_args)
         worker_items.append((worker_fn, worker_args, flattened))
     worker_arg_handles, worker_items = _deduplicate_warp_specialize_captures(worker_items)
-
-    if inline_user_promise:
-        builder.restore_insertion_point(insert_pt)
-        ws_op = builder.create_warp_specialize([], worker_arg_handles, worker_num_warps)
-        ws_op.set_requested_registers(worker_num_regs)
-
-        default_block = builder.create_block_with_parent(ws_op.get_default_region(), [])
-        builder.set_insertion_point_to_start(default_block)
-        default_results = _generator.inline_JitFunction(default_fn, default_args, kwargs={})
-        default_result_values = _as_result_values(default_results)
-        if default_result_values:
-            raise ValueError("user-promise inline warp_specialize does not support default partition return values")
-        builder.set_insertion_point_to_end(default_block)
-        builder.create_warp_yield([])
-
-        builder.create_block_with_parent(ws_op.get_partition_op_holder(), [])
-        partitions_op = builder.create_warp_specialize_partitions(num_partitions)
-        partition_arg_types = [arg.get_type() for arg in worker_arg_handles]
-        for idx, (worker_fn, worker_args, flattened, remapped) in enumerate(worker_items):
-            block = builder.create_block_with_parent(partitions_op.get_region(idx), partition_arg_types)
-            block_args = [block.get_argument(remapped[j]) for j in builtins.range(len(flattened))]
-            block_values = tuple(unflatten_ir_values(block_args, [arg.type for arg in worker_args]))
-            caller_context = WarpSpecializeCallerContext(worker_num_warps[idx])
-            _generator.inline_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
-            builder.set_insertion_point_to_end(block)
-            builder.create_warp_return()
-
-        builder.set_insertion_point_after(ws_op.get_operation())
-        return None
-
-    default_block = builder.new_block()
-    builder.set_insertion_point_to_start(default_block)
-    default_results = _generator.call_JitFunction(default_fn, default_args, kwargs={})
-    default_result_values = _as_result_values(default_results)
-    default_result_handles = flatten_values_to_ir(default_result_values)
-    builder.set_insertion_point_to_end(default_block)
-    builder.create_warp_yield(default_result_handles)
-    result_types = [result.get_type() for result in default_result_handles]
 
     builder.restore_insertion_point(insert_pt)
     ws_op = builder.create_warp_specialize(result_types, worker_arg_handles, worker_num_warps)
@@ -296,7 +258,7 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
         block_args = [block.get_argument(remapped[j]) for j in builtins.range(len(flattened))]
         block_values = tuple(unflatten_ir_values(block_args, [arg.type for arg in worker_args]))
         caller_context = WarpSpecializeCallerContext(worker_num_warps[idx])
-        _generator.call_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
+        call_jit_function(worker_fn, block_values, kwargs={}, caller_context=caller_context)
         builder.set_insertion_point_to_end(block)
         builder.create_warp_return()
 
