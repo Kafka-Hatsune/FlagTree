@@ -333,17 +333,39 @@ def Tle_RemotePointersOp : Tle_Op<"remote_pointers", [Pure]> {
   let arguments = (ins
     Tle_LocalPointerResultType:$src,
     TT_Int:$shard_id,
-    StrAttr:$space
+    StrAttr:$space,
+    Optional<TT_IntLike>:$offset
   );
 
   let results = (outs Tle_LocalPointerResultType:$result);
   let hasVerifier = 1;
 }
+def Tle_GetNumPesOp : Tle_Op<"get_num_pes"> {
+  let summary = "Get nume pes";
+  let arguments = (ins
+    Tle_LocalPointerResultType:$src
+  );
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+}
+
+def Tle_GetDeviceIdOp : Tle_Op<"get_device_id"> {
+  let summary = "Get local PE id";
+  let arguments = (ins
+     AnyType:$input
+  );
+  let results = (outs I32:$result);
+  let hasVerifier = 1;
+}
 
 def Tle_DSLRegionOp : Tle_Op<"dsl_region", [IsolatedFromAbove, MemDescViewTrait,
-                                            RecursiveMemoryEffects]> {
+                                            DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins
-    Variadic<Tle_ArgType>:$inputs
+    Variadic<Tle_ArgType>:$inputs,
+    StrAttr:$region_dialect,
+    StrAttr:$arg_dialect,
+    DenseI32ArrayAttr:$output_operand_indices,
+    OptionalAttr<StrAttr>:$hint
   );
   let results = (outs Variadic<Tle_ArgType>:$outputs);
   let regions = (region AnyRegion:$body);

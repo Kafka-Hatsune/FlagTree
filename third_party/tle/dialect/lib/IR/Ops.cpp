@@ -1,5 +1,6 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "tle/dialect/include/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -611,6 +612,16 @@ LogicalResult InsertTileOp::verify() {
   return success();
 }
 
+void DSLRegionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // TODO: Conservative memory effects on all dsl_region ops so empty deferred
+  // bodies are not DCE'd before materialize lowering exists. Narrow this to
+  // alias operands or deferred-only once materialize is implemented.
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 LogicalResult DSLRegionOp::verify() {
   Region &body = getBody();
   const uint32_t numArguments = body.getNumArguments(),
@@ -653,6 +664,24 @@ LogicalResult PackOp::verify() {
     return emitOpError() << "expects input struct to have at least 3 elements, "
                             "with the first two being pointer types.";
   }
+  return success();
+}
+
+LogicalResult GetDeviceIdOp::verify() {
+  auto resultTy = getResult().getType();
+
+  if (!resultTy.isInteger(32))
+    return emitOpError("result type must be i32");
+
+  return success();
+}
+
+LogicalResult GetNumPesOp::verify() {
+  auto resultTy = getResult().getType();
+
+  if (!resultTy.isInteger(32))
+    return emitOpError("result type must be i32");
+
   return success();
 }
 
@@ -866,73 +895,99 @@ LogicalResult RemotePointersOp::verify() {
   Type srcTy = getSrc().getType();
   Type resultTy = getResult().getType();
   auto spaceAttr = getSpace();
-  if (spaceAttr == "device")
-    return RemotePointers::verifyDeviceSpace(getSrc(), getResult());
+  if (spaceAttr == "device") {
+    if (failed(RemotePointers::verifyDeviceSpace(getSrc(), getResult())))
+      return failure();
+  } else {
+    auto getPtrInfo = [&](Type ty, triton::PointerType &ptr, bool &isTensor,
+                          ArrayRef<int64_t> &shape,
+                          Attribute &encoding) -> LogicalResult {
+      if (auto tensorTy = dyn_cast<RankedTensorType>(ty)) {
+        ptr = dyn_cast<triton::PointerType>(tensorTy.getElementType());
+        if (!ptr)
+          return emitOpError()
+                 << "expects tensor src/result element type to be tt.ptr";
+        isTensor = true;
+        shape = tensorTy.getShape();
+        encoding = tensorTy.getEncoding();
+        return success();
+      }
+      if (auto ptrTy = dyn_cast<triton::PointerType>(ty)) {
+        ptr = ptrTy;
+        isTensor = false;
+        shape = ArrayRef<int64_t>();
+        encoding = Attribute();
+        return success();
+      }
+      return emitOpError() << "expects src/result to be tensor<tt.ptr<...>> or "
+                              "tt.ptr";
+    };
 
-  auto getPtrInfo = [&](Type ty, triton::PointerType &ptr, bool &isTensor,
-                        ArrayRef<int64_t> &shape,
-                        Attribute &encoding) -> LogicalResult {
-    if (auto tensorTy = dyn_cast<RankedTensorType>(ty)) {
-      ptr = dyn_cast<triton::PointerType>(tensorTy.getElementType());
-      if (!ptr)
+    triton::PointerType srcPtrTy;
+    triton::PointerType resultPtrTy;
+    bool srcIsTensor = false;
+    bool resultIsTensor = false;
+    ArrayRef<int64_t> srcShape;
+    ArrayRef<int64_t> resultShape;
+    Attribute srcEncoding;
+    Attribute resultEncoding;
+    if (failed(
+            getPtrInfo(srcTy, srcPtrTy, srcIsTensor, srcShape, srcEncoding)) ||
+        failed(getPtrInfo(resultTy, resultPtrTy, resultIsTensor, resultShape,
+                          resultEncoding)))
+      return failure();
+
+    if (srcIsTensor != resultIsTensor)
+      return emitOpError()
+             << "expects src/result to both be scalar pointers or "
+                "both be pointer tensors";
+    if (srcIsTensor) {
+      if (srcShape != resultShape)
+        return emitOpError() << "expects src/result pointer tensor shapes to "
+                                "match";
+      if (srcEncoding && resultEncoding && srcEncoding != resultEncoding)
         return emitOpError()
-               << "expects tensor src/result element type to be tt.ptr";
-      isTensor = true;
-      shape = tensorTy.getShape();
-      encoding = tensorTy.getEncoding();
-      return success();
+               << "expects src/result pointer tensor encodings to "
+                  "match";
     }
-    if (auto ptrTy = dyn_cast<triton::PointerType>(ty)) {
-      ptr = ptrTy;
-      isTensor = false;
-      shape = ArrayRef<int64_t>();
-      encoding = Attribute();
-      return success();
-    }
-    return emitOpError() << "expects src/result to be tensor<tt.ptr<...>> or "
-                            "tt.ptr";
-  };
-
-  triton::PointerType srcPtrTy;
-  triton::PointerType resultPtrTy;
-  bool srcIsTensor = false;
-  bool resultIsTensor = false;
-  ArrayRef<int64_t> srcShape;
-  ArrayRef<int64_t> resultShape;
-  Attribute srcEncoding;
-  Attribute resultEncoding;
-  if (failed(getPtrInfo(srcTy, srcPtrTy, srcIsTensor, srcShape, srcEncoding)) ||
-      failed(getPtrInfo(resultTy, resultPtrTy, resultIsTensor, resultShape,
-                        resultEncoding)))
-    return failure();
-
-  if (srcIsTensor != resultIsTensor)
-    return emitOpError() << "expects src/result to both be scalar pointers or "
-                            "both be pointer tensors";
-  if (srcIsTensor) {
-    if (srcShape != resultShape)
-      return emitOpError() << "expects src/result pointer tensor shapes to "
+    if (srcPtrTy.getPointeeType() != resultPtrTy.getPointeeType())
+      return emitOpError() << "expects src/result pointer pointee types to "
                               "match";
-    if (srcEncoding && resultEncoding && srcEncoding != resultEncoding)
-      return emitOpError() << "expects src/result pointer tensor encodings to "
-                              "match";
+
+    if (spaceAttr == "cluster" &&
+        srcPtrTy.getAddressSpace() != kSharedMemoryAddressSpace)
+      return emitOpError()
+             << "expects src pointers to live in shared memory (addrspace=3)";
+    if (spaceAttr == "cluster" &&
+        resultPtrTy.getAddressSpace() != kClusterSharedMemoryAddressSpace)
+      return emitOpError()
+             << "expects result pointers to live in cluster shared memory "
+                "(addrspace=7)";
   }
-  if (srcPtrTy.getPointeeType() != resultPtrTy.getPointeeType())
-    return emitOpError() << "expects src/result pointer pointee types to "
-                            "match";
-
-  if (spaceAttr == "cluster" &&
-      srcPtrTy.getAddressSpace() != kSharedMemoryAddressSpace)
-    return emitOpError()
-           << "expects src pointers to live in shared memory (addrspace=3)";
-  if (spaceAttr == "cluster" &&
-      resultPtrTy.getAddressSpace() != kClusterSharedMemoryAddressSpace)
-    return emitOpError()
-           << "expects result pointers to live in cluster shared memory "
-              "(addrspace=7)";
 
   if (!getShardId().getType().isInteger(32))
     return emitOpError() << "expects shard_id to be i32";
+
+  bool hasOffset = getOffset() != nullptr;
+  if (spaceAttr == "device") {
+    if (!hasOffset)
+      return emitOpError() << "device space remote pointers require an offset";
+  } else {
+    if (hasOffset)
+      return emitOpError()
+             << "offset is only supported for device space remote pointers";
+  }
+
+  if (hasOffset) {
+    Type offsetTy = getOffset().getType();
+    if (auto tensorTy = dyn_cast<RankedTensorType>(offsetTy)) {
+      if (!tensorTy.getShape().empty())
+        return emitOpError() << "expects offset to be a scalar";
+      offsetTy = tensorTy.getElementType();
+    }
+    if (!offsetTy.isSignlessInteger(64))
+      return emitOpError() << "expects offset to be i64";
+  }
 
   return success();
 }

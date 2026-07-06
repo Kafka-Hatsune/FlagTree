@@ -2041,7 +2041,10 @@ struct FpToFpOpConversion
           (llvm::isa<Float8E4M3FNType, Float8E5M2Type>(dstElementType)) &&
           roundingMode == RoundingMode::RTNE) &&
         !(false /* isaFamily == HCU::ISAFamily::CDNA3 */ &&
-          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(dstElementType)));
+          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(
+              dstElementType))) &&
+        !(!capFP8F32 &&
+          (llvm::isa<Float8E5M2Type, Float8E4M3FNType>(dstElementType)));
 
     // fp8/bf8->f32, if not nanoo fp8/bf8 on CDNA3 or ocp fp8/bf8 on CDNA4, is
     // done in two steps: fp8/bf8->fp16 and fp16->fp32
@@ -2067,6 +2070,16 @@ struct FpToFpOpConversion
       numElements = 2;
       srcType = f32_ty;
       dstType = dstElementType;
+    }
+
+    // When direct fp32->fp8/bf8 SW conversion (no fp16 intermediate,
+    // non-CDNA4), numElements must be 2 because SW path
+    // (Fp32_to_Fp8E4M3FN_RTNE_SW, Fp32_to_Fp8E5M2_RTNE_SW) processes exactly 2
+    // elements per call.
+    if (!useFP16IntermediateSrc && !capFP8F32 && numElements > 2 &&
+        srcElementType.isF32() &&
+        llvm::isa<Float8E4M3FNType, Float8E5M2Type>(dstElementType)) {
+      numElements = 2;
     }
 
     SmallVector<Value> inVals;

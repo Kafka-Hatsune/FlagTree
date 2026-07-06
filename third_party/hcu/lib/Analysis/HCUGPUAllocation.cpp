@@ -1,12 +1,15 @@
 #include "Analysis/HCUGPUAllocation.h"
 #include "triton/Analysis/Allocation.h"
+#include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #ifdef __TLE__
 #include "tle/dialect/include/IR/Dialect.h"
 #endif
 
+#include "third_party/hcu/include/Dialect/TritonHCUGPU/IR/Dialect.h"
 #include "third_party/hcu/include/Dialect/TritonHCUGPU/Utility/CommonUtils.h"
 
 namespace mlir::triton::HCU {
@@ -133,6 +136,26 @@ unsigned getConvertLayoutScratchInBytes(RankedTensorType srcTy,
   return elems * getBitwidth(srcTy) / 8;
 }
 
+static unsigned getBufferAtomicScratchSizeInBytes(Operation *op) {
+  Value result = op->getResult(0);
+  if (result.use_empty())
+    return 0;
+  auto tensorTy = dyn_cast<RankedTensorType>(result.getType());
+  if (!tensorTy)
+    return 0;
+  auto freeVariableMasks = gpu::toLinearLayout(tensorTy).getFreeVariableMasks();
+  bool hasBroadcast = llvm::any_of(freeVariableMasks,
+                                   [](auto mask) { return mask.second != 0; });
+  if (!hasBroadcast)
+    return 0;
+  auto smemShape = convertType<unsigned>(gpu::getShapePerCTA(tensorTy));
+  auto elems = getNumScratchElements(smemShape);
+  if (elems == 0)
+    return 0;
+  auto elemTy = tensorTy.getElementType();
+  return elems * std::max<int>(8, elemTy.getIntOrFloatBitWidth()) / 8;
+}
+
 unsigned HCUAllocationAnalysisScratchSizeFn(Operation *op) {
 
   if (auto cvtLayout = dyn_cast<mlir::triton::gpu::ConvertLayoutOp>(op)) {
@@ -141,6 +164,10 @@ unsigned HCUAllocationAnalysisScratchSizeFn(Operation *op) {
     return getConvertLayoutScratchInBytes(srcTy, dstTy,
                                           op->hasAttr(AttrSharedMemPadded));
   }
+
+  if (isa<triton::hcugpu::BufferAtomicCASOp, triton::hcugpu::BufferAtomicRMWOp>(
+          op))
+    return getBufferAtomicScratchSizeInBytes(op);
 
 #ifdef __TLE__
   if (auto extractTileOp = dyn_cast<mlir::triton::tle::ExtractTileOp>(op)) {

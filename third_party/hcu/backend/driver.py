@@ -64,12 +64,22 @@ def _find_already_mmapped_dylib_on_linux(lib_name):
 
 
 @functools.lru_cache()
+def _is_dtk():
+    """Check if running under DTK (vs vanilla ROCm)."""
+    rocm_path = os.getenv("ROCM_PATH")
+    if rocm_path is not None:
+        return "dtk" in rocm_path.lower()
+    return Path("/opt/dtk").is_dir()
+
+
+@functools.lru_cache()
 def _get_path_to_hip_runtime_dylib():
-    lib_name = "libamdhip64.so"
+    # DTK uses libgalaxyhip.so as the primary HIP runtime library.
+    lib_name = "libgalaxyhip.so" if _is_dtk() else "libamdhip64.so"
 
     # If we are told explicitly what HIP runtime dynamic library to use, obey that.
     if env_libhip_path := knobs.hcu.libhip_path:
-        if env_libhip_path.endswith(lib_name) and os.path.exists(env_libhip_path):
+        if os.path.exists(env_libhip_path):
             return env_libhip_path
         raise RuntimeError(f"TRITON_LIBHIP_PATH '{env_libhip_path}' does not point to a valid {lib_name}")
 
@@ -151,7 +161,10 @@ def _get_path_to_hip_runtime_dylib():
         paths.append(loc)
 
     # As a last resort, guess if we have it in some common installation path.
-    common_install_path = os.path.join('/opt/rocm/lib/', lib_name)
+    if _is_dtk():
+        common_install_path = os.path.join('/opt/dtk/lib/', lib_name)
+    else:
+        common_install_path = os.path.join('/opt/rocm/lib/', lib_name)
     if os.path.exists(common_install_path):
         return common_install_path
     paths.append(common_install_path)
@@ -173,6 +186,9 @@ class HIPUtils(object):
         # This way we don't need to escape-quote C code curly brackets and we can replace
         # exactly once.
         src = src.replace('/*py_libhip_search_path*/', libhip_path, 1)
+        # DTK uses hipGetDeviceProperties_v2, ROCm uses hipGetDevicePropertiesR0600.
+        hip_dev_props_sym = "hipGetDeviceProperties_v2" if _is_dtk() else "hipGetDevicePropertiesR0600"
+        src = src.replace('/*py_hip_get_device_properties_sym*/ NULL', f'"{hip_dev_props_sym}"', 1)
         mod = compile_module_from_src(src=src, name="hip_utils", include_dirs=include_dirs)
         self.load_binary = mod.load_binary
         self.get_device_properties = mod.get_device_properties
@@ -346,6 +362,9 @@ def make_launcher(constants, signature, warp_size, tensordesc_meta):
     params = [f"&arg{i}" for i, ty in signature.items() if ty != "constexpr"]
     params.append("&global_scratch")
     params.append("&profile_scratch")
+    # DTK: primary lib is libgalaxyhip.so; ROCm: primary lib is libamdhip64.so
+    _noload_primary = "libgalaxyhip.so" if _is_dtk() else "libamdhip64.so"
+    _noload_secondary = "libamdhip64.so" if _is_dtk() else "libgalaxyhip.so"
     src = f"""
 #define __HIP_PLATFORM_AMD__
 #include <hip/hip_runtime.h>
@@ -417,8 +436,11 @@ struct HIPSymbolTable {{
 static struct HIPSymbolTable hipSymbolTable;
 
 bool initSymbolTable() {{
-  // Use the HIP runtime library loaded into the existing process if it exits.
-  void *lib = dlopen("libamdhip64.so", RTLD_NOLOAD);
+  // Use the HIP runtime library loaded into the existing process if it exists.
+  void *lib = dlopen("{_noload_primary}", RTLD_NOLOAD);
+  if (!lib) {{
+    lib = dlopen("{_noload_secondary}", RTLD_NOLOAD);
+  }}
 
   // Otherwise, go through the list of search paths to dlopen the first HIP
   // driver library.
@@ -432,7 +454,7 @@ bool initSymbolTable() {{
     }}
   }}
   if (!lib) {{
-    PyErr_SetString(PyExc_RuntimeError, "cannot open libamdhip64.so");
+    PyErr_SetString(PyExc_RuntimeError, "cannot open HIP runtime library");
     return false;
   }}
 
@@ -446,7 +468,7 @@ bool initSymbolTable() {{
   error = dlerror();
   if (error) {{
     PyErr_SetString(PyExc_RuntimeError,
-                    "cannot query 'hipGetProcAddress' from libamdhip64.so");
+                    "cannot query 'hipGetProcAddress' from HIP runtime library");
     dlclose(lib);
     return false;
   }}
@@ -463,7 +485,7 @@ bool initSymbolTable() {{
   if (required && status != hipSuccess) {{                                     \
     PyErr_SetString(PyExc_RuntimeError,                                        \
                     "cannot get address for '" #hipSymbolName                  \
-                    "' from libamdhip64.so");                                  \
+                    "' from HIP runtime library");                             \
     dlclose(lib);                                                              \
     return false;                                                              \
   }}

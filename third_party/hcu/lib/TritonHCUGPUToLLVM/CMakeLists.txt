@@ -26,6 +26,7 @@ add_triton_library(TritonHCUGPUToLLVM
     UpcastMXFPToLLVM.cpp
     Fp4ToFpOpToLLVM.cpp
     MembarUtility.cpp
+    WaitCntHCUUtility.cpp
     ScalarizePackedFOps.cpp
     TDMUtility.cpp
     BarrierOpToLLVM.cpp

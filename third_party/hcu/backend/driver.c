@@ -118,6 +118,8 @@ static bool encodeTDMDescriptor(TDMDescriptor *desc, int elementBitWidth,
 
 // The list of paths to search for the HIP runtime library. The caller Python
 // code should substitute the search path placeholder.
+// For DTK environments, libgalaxyhip.so is the actual implementation while
+// libamdhip64.so is a symlink to it. We search both names.
 static const char *hipLibSearchPaths[] = {"/*py_libhip_search_path*/"};
 
 // The list of HIP dynamic library symbols and their signature we are interested
@@ -134,32 +136,6 @@ static const char *hipLibSearchPaths[] = {"/*py_libhip_search_path*/"};
   FOR_EACH_ERR_FN(hipFuncGetAttribute, int *, hipFunction_attribute attr,      \
                   hipFunction_t function)
 
-// HIP driver version format: HIP_VERSION_MAJOR * 10000000 + HIP_VERSION_MINOR *
-// 100000 + HIP_VERSION_PATCH.
-#define TRITON_HIP_DRIVER_EXTRACT_MAJOR_VERSION(version) ((version) / 10000000)
-#define TRITON_HIP_DRIVER_EXTRACT_MINOR_VERSION(version)                       \
-  (((version) % 10000000) / 100000)
-#define TRITON_HIP_DRIVER_EXTRACT_PATCH_VERSION(version) ((version) % 100000)
-#define TRITON_HIP_DRIVER_REQ_MAJOR_VERSION (6)
-
-// #define TRITON_HIP_DRIVER_DBG_VERSION
-#ifdef TRITON_HIP_DRIVER_DBG_VERSION
-#define TRITON_HIP_DRIVER_LOG_VERSION(version, msgBuff)                        \
-  do {                                                                         \
-    snprintf(msgBuff, sizeof(msgBuff), "libamdhip64 version is: %d.%d.%d",     \
-             TRITON_HIP_DRIVER_EXTRACT_MAJOR_VERSION(version),                 \
-             TRITON_HIP_DRIVER_EXTRACT_MINOR_VERSION(version),                 \
-             TRITON_HIP_DRIVER_EXTRACT_PATCH_VERSION(version));                \
-    printf("%s\n", msgBuff);                                                   \
-  } while (0);
-#else
-#define TRITON_HIP_DRIVER_LOG_VERSION(version, msgBuff)                        \
-  do {                                                                         \
-    (void)msgBuff;                                                             \
-    (void)(version);                                                           \
-  } while (0);
-#endif
-
 #define TRITON_HIP_MSG_BUFF_SIZE (1024U)
 
 // The HIP symbol table for holding resolved dynamic library symbols.
@@ -173,56 +149,19 @@ struct HIPSymbolTable {
 };
 
 static struct HIPSymbolTable hipSymbolTable;
-// HCU: compatiable with DTK, hipDeviceProp_t -> hipDeviceProp_tR0600,
-// hipGetDevicePropertiesR0600 for ROCM
-//                                            -> hipDeviceProp_t_v2,
-//                                            hipGetDeviceProperties_v2   for
-//                                            DTK
+// HCU: compatible with DTK and ROCm for device properties.
+// ROCm 6.0+: hipDeviceProp_tR0600 / hipGetDevicePropertiesR0600
+// DTK:       hipDeviceProp_t_v2  / hipGetDeviceProperties_v2
+// Both v2-style structs share the same memory layout for the fields we use.
+// In the bundled ROCm headers, hipDeviceProp_t is #defined to
+// hipDeviceProp_tR0600, and the DTK hipDeviceProp_t_v2 has the same layout. We
+// use hipDeviceProp_t (which resolves to the R0600/v2 layout) for the function
+// pointer signature.
 static hipError_t (*hipGetDevicePropertiesCompat)(hipDeviceProp_t *prop,
                                                   int deviceId);
 
-static int checkDriverVersion(void *lib) {
-  int hipVersion = -1;
-  const char *error = NULL;
-  typedef hipError_t (*hipDriverGetVersion_fn)(int *driverVersion);
-  hipDriverGetVersion_fn hipDriverGetVersion;
-  dlerror(); // Clear existing errors
-  hipDriverGetVersion =
-      (hipDriverGetVersion_fn)dlsym(lib, "hipDriverGetVersion");
-  error = dlerror();
-  if (error) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "cannot query 'hipDriverGetVersion' from libamdhip64.so");
-    dlclose(lib);
-    return -1;
-  }
-
-  (void)hipDriverGetVersion(&hipVersion);
-  char msgBuff[TRITON_HIP_MSG_BUFF_SIZE] = {0};
-
-  const int hipMajVersion = TRITON_HIP_DRIVER_EXTRACT_MAJOR_VERSION(hipVersion);
-  if (hipMajVersion < TRITON_HIP_DRIVER_REQ_MAJOR_VERSION) {
-    const int hipMinVersion =
-        TRITON_HIP_DRIVER_EXTRACT_MINOR_VERSION(hipVersion);
-    const int hipPatchVersion =
-        TRITON_HIP_DRIVER_EXTRACT_PATCH_VERSION(hipVersion);
-    snprintf(msgBuff, sizeof(msgBuff),
-             "libamdhip64 version %d.%d.%d is not supported! Required major "
-             "version is >=%d.",
-             hipMajVersion, hipMinVersion, hipPatchVersion,
-             TRITON_HIP_DRIVER_REQ_MAJOR_VERSION);
-    PyErr_SetString(PyExc_RuntimeError, msgBuff);
-    dlclose(lib);
-    return -1;
-  }
-
-  TRITON_HIP_DRIVER_LOG_VERSION(hipVersion, msgBuff);
-
-  return hipVersion;
-}
-
 bool initSymbolTable() {
-  void *lib;
+  void *lib = NULL;
 
   // Go through the list of search paths to dlopen the first HIP driver library.
   int n = sizeof(hipLibSearchPaths) / sizeof(hipLibSearchPaths[0]);
@@ -230,66 +169,42 @@ bool initSymbolTable() {
     void *handle = dlopen(hipLibSearchPaths[i], RTLD_LAZY | RTLD_LOCAL);
     if (handle) {
       lib = handle;
-      // printf("[triton] chosen %s\n", hipLibSearchPaths[i]);
     }
   }
 
   if (!lib) {
-    PyErr_SetString(PyExc_RuntimeError, "cannot open libamdhip64.so");
+    PyErr_SetString(PyExc_RuntimeError, "cannot open HIP runtime library");
     return false;
   }
 
-  int hipVersion = checkDriverVersion(lib);
-  if (hipVersion == -1)
-    return false;
-
-  const char *error = NULL;
-  typedef hipError_t (*hipGetProcAddress_fn)(
-      const char *symbol, void **pfn, int hipVersion, uint64_t hipFlags,
-      hipDriverProcAddressQueryResult *symbolStatus);
-  hipGetProcAddress_fn hipGetProcAddress;
+  // Use dlsym to resolve symbols directly. Do NOT call any hipXX API (e.g.
+  // hipGetProcAddress, hipDriverGetVersion) here — calling HIP APIs before all
+  // processes are created (e.g. torch multiprocessing fork) causes subprocess
+  // initialization failures. dlopen/dlsym are safe as they only operate on the
+  // ELF loader, not the HIP driver.
   dlerror(); // Clear existing errors
-
-  *(void **)&hipGetProcAddress = dlsym(lib, "hipGetProcAddress");
-  error = dlerror();
-  if (error) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "cannot query 'hipGetProcAddress' from libamdhip64.so");
-    dlclose(lib);
-    return false;
-  }
-
-  // Resolve all symbols we are interested in.
-  uint64_t hipFlags = 0;
-  hipDriverProcAddressQueryResult symbolStatus;
-  hipError_t status = hipSuccess;
+  const char *error = NULL;
 #define QUERY_EACH_FN(hipSymbolName, ...)                                      \
-  status = hipGetProcAddress(#hipSymbolName,                                   \
-                             (void **)&hipSymbolTable.hipSymbolName,           \
-                             hipVersion, hipFlags, &symbolStatus);             \
-  if (status != hipSuccess) {                                                  \
-    PyErr_SetString(PyExc_RuntimeError,                                        \
-                    "cannot get address for '" #hipSymbolName                  \
-                    "' from libamdhip64.so");                                  \
+  *(void **)&hipSymbolTable.hipSymbolName = dlsym(lib, #hipSymbolName);        \
+  error = dlerror();                                                           \
+  if (error) {                                                                 \
+    PyErr_SetString(PyExc_RuntimeError, "cannot query '" #hipSymbolName        \
+                                        "' from HIP runtime library");         \
     dlclose(lib);                                                              \
     return false;                                                              \
   }
 
   HIP_SYMBOL_LIST(QUERY_EACH_FN, QUERY_EACH_FN)
 
-  status = hipGetProcAddress("hipGetDevicePropertiesR0600",
-                             (void **)&hipGetDevicePropertiesCompat, hipVersion,
-                             hipFlags, &symbolStatus);
-  if (status != hipSuccess) {
-    status = hipGetProcAddress("hipGetDeviceProperties_v2",
-                               (void **)&hipGetDevicePropertiesCompat,
-                               hipVersion, hipFlags, &symbolStatus);
-  }
-  if (status != hipSuccess) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "cannot get address for any supported HIP 6.x device "
-                    "properties symbol from "
-                    "libamdhip64.so");
+  // Resolve hipGetDeviceProperties with environment-specific symbol name.
+  // DTK uses hipGetDeviceProperties_v2, ROCm uses hipGetDevicePropertiesR0600.
+  const char *hipGetDevPropsSym = /*py_hip_get_device_properties_sym*/ NULL;
+  *(void **)&hipGetDevicePropertiesCompat = dlsym(lib, hipGetDevPropsSym);
+  error = dlerror();
+  if (error) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        "cannot query device properties symbol from HIP runtime library");
     dlclose(lib);
     return false;
   }
@@ -322,23 +237,31 @@ static inline void gpuAssert(hipError_t code, const char *file, int line) {
       return NULL;                                                             \
   }
 
+// The runtime hipDeviceProp_tR0600/hipDeviceProp_t_v2 may be larger than the
+// compile-time hipDeviceProp_t (bundled headers). Allocate extra padding to
+// avoid stack overflow when the runtime writes a larger struct.
+#define HIP_PROPS_EXTRA_PADDING (64)
+
 static PyObject *getDeviceProperties(PyObject *self, PyObject *args) {
   int device_id;
   if (!PyArg_ParseTuple(args, "i", &device_id))
     return NULL;
 
-  hipDeviceProp_t props = {0};
-  HIP_CHECK(hipGetDevicePropertiesCompat(&props, device_id));
-  props.gcnArchName[sizeof(props.gcnArchName) - 1] = '\0';
+  char buf[sizeof(hipDeviceProp_t) + HIP_PROPS_EXTRA_PADDING];
+  memset(buf, 0, sizeof(buf));
+  hipDeviceProp_t *props = (hipDeviceProp_t *)buf;
+  HIP_CHECK(hipGetDevicePropertiesCompat(props, device_id));
+  props->gcnArchName[sizeof(props->gcnArchName) - 1] = '\0';
 
   // create a struct to hold device properties
   return Py_BuildValue(
       "{s:i, s:i, s:i, s:i, s:i, s:i, s:s, s:i, s:i}", "max_shared_mem",
-      props.sharedMemPerBlock, "max_num_regs", props.regsPerBlock,
-      "multiprocessor_count", props.multiProcessorCount, "sm_clock_rate",
-      props.clockRate, "mem_clock_rate", props.memoryClockRate, "mem_bus_width",
-      props.memoryBusWidth, "arch", props.gcnArchName, "warpSize",
-      props.warpSize, "max_threads_per_sm", props.maxThreadsPerMultiProcessor);
+      props->sharedMemPerBlock, "max_num_regs", props->regsPerBlock,
+      "multiprocessor_count", props->multiProcessorCount, "sm_clock_rate",
+      props->clockRate, "mem_clock_rate", props->memoryClockRate,
+      "mem_bus_width", props->memoryBusWidth, "arch", props->gcnArchName,
+      "warpSize", props->warpSize, "max_threads_per_sm",
+      props->maxThreadsPerMultiProcessor);
 }
 
 static PyObject *loadBinary(PyObject *self, PyObject *args) {
