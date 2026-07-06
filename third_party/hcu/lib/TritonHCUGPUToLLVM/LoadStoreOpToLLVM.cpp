@@ -1712,9 +1712,8 @@ struct AtomicCASOpConversion
     auto atomicMemOrdering = getMemoryOrdering(memOrdering);
     if (!atomicMemOrdering)
       return rewriter.notifyMatchFailure(op, "Unknown HCUGPU memory ordering");
-    auto scope = op.getScope();
-    auto scopeStr = getHCUGPUMemScopeStr(scope);
-    if (!scopeStr)
+    auto scope = getHCUGPUMemScopeStr(op.getScope());
+    if (!scope)
       return rewriter.notifyMatchFailure(op, "Unknown HCUGPU memory scope");
 
     // deal with tensor or scalar
@@ -1724,27 +1723,68 @@ struct AtomicCASOpConversion
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
                  : valueTy;
     auto valueElemNBits = valueElemTy.getIntOrFloatBitWidth();
+    Type valueElemIntTy{};
+    if (!valueElemTy.isSignlessInteger()) {
+      valueElemIntTy = rewriter.getIntegerType(valueElemNBits);
+    }
     auto elemsPerThread = getTotalElemsPerThread(op.getVal().getType());
     SmallVector<Value> resultVals(elemsPerThread);
 
+    auto successOrdering = *atomicMemOrdering;
+    auto failureOrdering = LLVM::AtomicOrdering::monotonic;
+    auto scopeStr = StringRef(scope.value());
+
+    auto freeVarMasks = getFreeVariableMasks(op.getPtr().getType());
+    Value threadPred =
+        emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
+    uint32_t regMask = freeVarMasks[str_attr("reg")];
+
     // atomic ops
     for (size_t i = 0; i < elemsPerThread; i += 1) {
+      if (tensorTy && (i & ~regMask) != i) {
+        resultVals[i] = resultVals[i & ~regMask];
+        continue;
+      }
       Value casVal = valElements[i];
       Value casCmp = cmpElements[i];
       Value casPtr = ptrElements[i];
+      if (valueElemIntTy) {
+        casVal = LLVM::BitcastOp::create(rewriter, loc, valueElemIntTy, casVal);
+        casCmp = LLVM::BitcastOp::create(rewriter, loc, valueElemIntTy, casCmp);
+      }
       // use op
       if (tensorTy) { // for tensor
         auto retType = valueElemTy;
         // TODO: USE ATOMIC CAS OP on Tensor
-        auto successOrdering = *atomicMemOrdering;
-        auto failureOrdering = LLVM::AtomicOrdering::monotonic;
+        Value undefVal = b.undef(valueElemTy);
+        auto *curBlock = rewriter.getInsertionBlock();
+        auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+        auto *atomicBlock = rewriter.createBlock(
+            curBlock->getParent(), std::next(Region::iterator(curBlock)));
+        endBlock->addArgument({valueElemTy}, {loc});
+
+        rewriter.setInsertionPointToEnd(curBlock);
+        LLVM::CondBrOp::create(rewriter, loc, threadPred, atomicBlock, endBlock,
+                               undefVal);
+
+        rewriter.setInsertionPointToEnd(atomicBlock);
+
         auto cmpxchg = LLVM::AtomicCmpXchgOp::create(
             rewriter, loc, casPtr, casCmp, casVal, successOrdering,
-            failureOrdering, StringRef(scopeStr.value()));
+            failureOrdering, scopeStr);
 
         // Extract the new_loaded value from the pair.
-        Value ret = b.extract_val(valueElemTy, cmpxchg, i);
-        resultVals[i] = ret;
+        Value ret;
+        if (valueElemIntTy) {
+          ret = b.extract_val(valueElemIntTy, cmpxchg, 0);
+          ret = LLVM::BitcastOp::create(rewriter, loc, valueElemTy, ret);
+        } else {
+          ret = b.extract_val(valueElemTy, cmpxchg, 0);
+        }
+
+        LLVM::BrOp::create(rewriter, loc, ret, endBlock);
+        rewriter.setInsertionPointToStart(endBlock);
+        resultVals[i] = endBlock->getArgument(0);
       } else { // for scalar
         // Build blocks to bypass the atomic instruction for ~rmwMask.
         auto *curBlock = rewriter.getInsertionBlock();
@@ -1761,15 +1801,20 @@ struct AtomicCASOpConversion
         // Build main block with atomic_cmpxchg.
         rewriter.setInsertionPointToEnd(atomicBlock);
 
-        auto successOrdering = LLVM::AtomicOrdering::acq_rel;
-        auto failureOrdering = LLVM::AtomicOrdering::monotonic;
         auto cmpxchg = LLVM::AtomicCmpXchgOp::create(
             rewriter, loc, casPtr, casCmp, casVal, successOrdering,
-            failureOrdering, StringRef("agent"));
+            failureOrdering, scopeStr);
 
         if (!op.getResult().use_empty()) {
           // Extract the new_loaded value from the pair.
-          Value newLoaded = b.extract_val(valueElemTy, cmpxchg, 0);
+          Value newLoaded;
+          if (valueElemIntTy) {
+            newLoaded = b.extract_val(valueElemIntTy, cmpxchg, 0);
+            newLoaded =
+                LLVM::BitcastOp::create(rewriter, loc, valueElemTy, newLoaded);
+          } else {
+            newLoaded = b.extract_val(valueElemTy, cmpxchg, 0);
+          }
           Value atomPtr =
               getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
           b.store(newLoaded, atomPtr);
@@ -1797,10 +1842,8 @@ struct AtomicCASOpConversion
       }
     }
 
-    // FIXME: threadPred = b.true_val() is buggy
     finalizeTensorAtomicResults(op, tensorTy, rewriter, resultVals, valueElemTy,
-                                b, b.true_val(), targetInfo,
-                                getTypeConverter());
+                                b, threadPred, targetInfo, getTypeConverter());
     return success();
   }
 };
@@ -1888,6 +1931,9 @@ struct AtomicRMWOpConversion
     // element and reduce contention.
     bool applyPackingF16 = false;
     auto vec = getVectorSize(ptr, axisAnalysisPass);
+    if (llMask) {
+      vec = std::min<unsigned>(vec, getMaskAlignment(op.getMask()));
+    }
 
     // CDNA3/CDNA4 arch allows to accelerate its atomics with LDS reduction
     // algorithm, which is only applicable for atomics with no return. Otherwise

@@ -7,6 +7,8 @@ if(FLAGTREE_TLE)
   )
 endif()
 
+get_flagtree_backend_lib("TritonGPUTransforms" _EXTRA_LINK_LIBS)
+
 add_triton_library(TritonGPUTransforms
   AccelerateMatmul.cpp
   ProcessSharedMemoryHint.cpp
@@ -63,4 +65,5 @@ add_triton_library(TritonGPUTransforms
   TritonToTritonGPU
   TritonInstrumentIR
   MLIRTransformUtils
+  ${_EXTRA_LINK_LIBS}
 )

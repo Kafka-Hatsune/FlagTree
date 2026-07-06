@@ -6,6 +6,7 @@ from typing import Optional, Sequence
 from enum import Enum
 from . import types as tle
 from .mthreads import copy as mthreads_copy
+from .iluvatar import copy as iluvatar_copy
 from triton.compiler.code_generator import flatten_values_to_ir, unflatten_ir_values
 
 from triton.language.core import (
@@ -941,6 +942,7 @@ def copy(
             tle.gpu.barrier_wait(bar, phaseIdx=0)
     """
     mthreads_enabled = mthreads_copy.enabled()
+    iluvatar_enabled = iluvatar_copy.enabled()
 
     def normcopy(
         src: tl.tensor,
@@ -973,7 +975,7 @@ def copy(
         try:
             if direction == CopyDirection.GM_TO_LOCAL:
                 # None fills the FlagTree hints slot; TLE copy has no hints to pass.
-                load_extra_args = () if mthreads_enabled else (None, )
+                load_extra_args = () if (mthreads_enabled or iluvatar_enabled) else (None, )
                 tt_load = _semantic.load(src, mask, other, boundary_check, padding_option, cache_modifier,
                                          eviction_policy, volatile, *load_extra_args)
                 local_ptrs = local_ptr(dst, _make_full_indices(dst, _semantic), _semantic=_semantic)

@@ -64,10 +64,17 @@ extern std::vector<int64_t>
 computeAliasOperandIndices(TritonOpBuilder &self, std::string_view text,
                            const std::vector<Value> &args);
 
-extern tle::DSLRegionOp
-createTLERawRegionByLLVMFunc(TritonOpBuilder &self, std::string_view text,
-                             const std::vector<Value> &args,
-                             const std::vector<int64_t> &aliasOperandIndices);
+extern tle::DSLRegionOp createTLERawRegionByLLVMFunc(
+    TritonOpBuilder &self, std::string_view text,
+    std::string_view regionDialect, std::string_view argDialect,
+    const std::vector<Value> &args,
+    const std::vector<int64_t> &aliasOperandIndices, std::string_view hint);
+
+extern tle::DSLRegionOp createTLERawRegionDeferred(
+    TritonOpBuilder &self, std::string_view sourceId,
+    std::string_view regionDialect, std::string_view argDialect,
+    const std::vector<Value> &args,
+    const std::vector<int64_t> &aliasOperandIndices, std::string_view hint);
 
 void init_triton_tle_ir(py::module &&m) {
 
@@ -560,20 +567,34 @@ void init_triton_tle_ir(py::module &&m) {
           },
           py::arg("group_kind"), py::arg("group_shape"), py::arg("group_axes"),
           py::arg("group_mask"))
-      .def("create_remote_pointers",
-           [](TritonOpBuilder &self, Type resultTy, Value src, Value shardId,
-              const std::string &space) -> OpState {
+      .def(
+          "create_remote_pointers",
+          [](TritonOpBuilder &self, Type resultTy, Value src, Value shardId,
+             const std::string &space,
+             std::optional<Value> &offset) -> OpState {
+            auto &builder = self.getBuilder();
+            static const std::unordered_set<std::string> valid = {
+                "cluster", "device", "node"};
+            if (valid.find(space) == valid.end()) {
+              throw std::invalid_argument(
+                  "Invalid space: " + space +
+                  ". Expected one of: cluster, device, node.");
+            }
+            auto space_attr = builder.getStringAttr(space);
+            return self.create<tle::RemotePointersOp>(
+                resultTy, src, shardId, space_attr, offset.value_or(Value()));
+          },
+          py::arg("resultTy"), py::arg("src"), py::arg("shardId"),
+          py::arg("space"), py::arg("offset") = py::none())
+      .def("get_device_id",
+           [](TritonOpBuilder &self, Type resultTy, Value src) -> Value {
              auto &builder = self.getBuilder();
-             static const std::unordered_set<std::string> valid = {
-                 "cluster", "device", "node"};
-             if (valid.find(space) == valid.end()) {
-               throw std::invalid_argument(
-                   "Invalid space: " + space +
-                   ". Expected one of: cluster, device, node.");
-             }
-             auto space_attr = builder.getStringAttr(space);
-             return self.create<tle::RemotePointersOp>(resultTy, src, shardId,
-                                                       space_attr);
+             return self.create<tle::GetDeviceIdOp>(resultTy, src);
+           })
+      .def("get_n_pes",
+           [](TritonOpBuilder &self, Type resultTy, Value src) -> Value {
+             auto &builder = self.getBuilder();
+             return self.create<tle::GetNumPesOp>(resultTy, src);
            })
       .def("get_memdesc_type",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
@@ -678,8 +699,14 @@ void init_tle_raw_ir(py::module &&m) {
   auto *builder_cls = ir::getBuilderClass();
   builder_cls->def("compute_alias_operand_indices",
                    &computeAliasOperandIndices);
-  builder_cls->def("create_tle_raw_region_by_llvm_func",
-                   &createTLERawRegionByLLVMFunc);
+  builder_cls->def(
+      "create_tle_raw_region_by_llvm_func", &createTLERawRegionByLLVMFunc,
+      py::arg("text"), py::arg("region_dialect"), py::arg("arg_dialect"),
+      py::arg("args"), py::arg("output_operand_indices"), py::arg("hint") = "");
+  builder_cls->def(
+      "create_tle_raw_region_deferred", &createTLERawRegionDeferred,
+      py::arg("source_id"), py::arg("region_dialect"), py::arg("arg_dialect"),
+      py::arg("args"), py::arg("output_operand_indices"), py::arg("hint") = "");
   builder_cls->def("get_context", &TritonOpBuilder::getContext);
 }
 

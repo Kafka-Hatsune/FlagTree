@@ -427,7 +427,9 @@ class CMakeBuild(build_ext):
         build_ext.finalize_options(self)
 
     def run(self):
-        download_and_copy_dependencies()
+        active_backend = os.environ.get("FLAGTREE_BACKEND", "")
+        if active_backend not in ("xpu", ):
+            download_and_copy_dependencies()
 
         try:
             out = subprocess.check_output(["cmake", "--version"])
@@ -540,6 +542,10 @@ class CMakeBuild(build_ext):
         if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
             cmake_args += self.get_proton_cmake_args()
 
+        if helper.flagtree_backend == "iluvatar":
+            gluon_flag = "ON" if check_env_flag("TRITON_ILU_BUILD_GLUON") else "OFF"
+            cmake_args += [f"-DTRITON_BUILD_GLUON={gluon_flag}"]
+
         if is_offline_build():
             # unit test builds fetch googletests from GitHub
             cmake_args += ["-DTRITON_BUILD_UT=OFF"]
@@ -644,7 +650,7 @@ def download_and_copy_dependencies():
 
 
 if helper.flagtree_backend:
-    if helper.flagtree_backend in ("aipu", "tsingmicro", "enflame", "rpu", "thrive"):
+    if helper.flagtree_backend in ("aipu", "tsingmicro", "enflame", "rpu", "thrive", "sunrise"):
         backends = [
             *BackendInstaller.copy(helper.configs.default_backends + tuple(helper.configs.extend_backends)),
             *BackendInstaller.copy_externals(),
