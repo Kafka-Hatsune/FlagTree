@@ -8,7 +8,10 @@ from triton.compiler.compiler import ASTSource, make_backend
 
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _USER_PROMISE_MODE = "user_promise"
-_USER_PROMISE_MODE_ATTR = f'"{_WGMMA_PIPELINE_MODE_ATTR}" = "{_USER_PROMISE_MODE}"'
+_USER_PROMISE_MODE_ATTRS = (
+    f'"{_WGMMA_PIPELINE_MODE_ATTR}" = "{_USER_PROMISE_MODE}"',
+    f'{_WGMMA_PIPELINE_MODE_ATTR} = "{_USER_PROMISE_MODE}"',
+)
 _HOPPER_TARGET = GPUTarget("cuda", 90, 32)
 
 
@@ -115,6 +118,10 @@ def _make_ttir(kernel, signature=None):
     return str(module)
 
 
+def _has_user_promise_mode_attr(ttir):
+    return any(attr in ttir for attr in _USER_PROMISE_MODE_ATTRS)
+
+
 @pytest.mark.parametrize(
     ("kernel", "signature", "routes_user_promise"),
     [
@@ -127,7 +134,7 @@ def _make_ttir(kernel, signature=None):
 def test_tle_wgmma_pipeline_route_marker_exact_api_list(kernel, signature, routes_user_promise):
     ttir = _make_ttir(kernel, signature)
 
-    assert (_USER_PROMISE_MODE_ATTR in ttir) is routes_user_promise
+    assert _has_user_promise_mode_attr(ttir) is routes_user_promise
 
 
 def test_tle_warp_specialize_keeps_call_lowering_without_user_promise_marker():
@@ -135,12 +142,12 @@ def test_tle_warp_specialize_keeps_call_lowering_without_user_promise_marker():
 
     assert "ttg.warp_specialize" in ttir
     assert "tt.call" in ttir
-    assert _USER_PROMISE_MODE_ATTR not in ttir
+    assert not _has_user_promise_mode_attr(ttir)
 
 
 def test_tle_warp_specialize_inlines_with_user_promise_marker():
     ttir = _make_ttir(_warp_specialize_barrier_inline_kernel, {"out": "*i32"})
 
     assert "ttg.warp_specialize" in ttir
-    assert _USER_PROMISE_MODE_ATTR in ttir
+    assert _has_user_promise_mode_attr(ttir)
     assert "tt.call" not in ttir
