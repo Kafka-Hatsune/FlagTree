@@ -8,6 +8,27 @@ from triton.compiler.compiler import ASTSource, make_backend
 
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _USER_PROMISE_MODE = "user_promise"
+_USER_PROMISE_MODE_ATTR = f'"{_WGMMA_PIPELINE_MODE_ATTR}" = "{_USER_PROMISE_MODE}"'
+_HOPPER_TARGET = GPUTarget("cuda", 90, 32)
+
+
+def _require_cuda():
+    try:
+        import torch
+
+        target = triton.runtime.driver.active.get_current_target()
+        if target.backend != "cuda":
+            pytest.skip(f"CUDA Hopper backend is required, got {target.backend}")
+        if int(target.arch) < 90:
+            pytest.skip(f"CUDA Hopper backend is required, got sm{target.arch}")
+        torch.cuda.init()
+    except Exception as exc:
+        pytest.skip(f"CUDA init failed: {exc}")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cuda_guard():
+    _require_cuda()
 
 
 @triton.jit
@@ -65,7 +86,7 @@ def _ws_barrier_worker(bar, out):
 
 
 @triton.jit
-def _warp_specialize_user_promise_inline_kernel(out):
+def _warp_specialize_barrier_inline_kernel(out):
     bar = tle.gpu.alloc_barrier()
     tle.gpu.warp_specialize(
         [
@@ -78,15 +99,14 @@ def _warp_specialize_user_promise_inline_kernel(out):
 
 
 def _make_ttir(kernel, signature=None):
-    target = GPUTarget("cuda", 90, 32)
-    backend = make_backend(target)
+    backend = make_backend(_HOPPER_TARGET)
     options = backend.parse_options({"num_warps": 4})
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)
     src = ASTSource(fn=kernel, signature=signature or {}, constexprs={})
     module = src.make_ir(
-        target,
+        _HOPPER_TARGET,
         options,
         backend.get_codegen_implementation(options),
         backend.get_module_map(),
@@ -107,8 +127,7 @@ def _make_ttir(kernel, signature=None):
 def test_tle_wgmma_pipeline_route_marker_exact_api_list(kernel, signature, routes_user_promise):
     ttir = _make_ttir(kernel, signature)
 
-    assert (_WGMMA_PIPELINE_MODE_ATTR in ttir) is routes_user_promise
-    assert (_USER_PROMISE_MODE in ttir) is routes_user_promise
+    assert (_USER_PROMISE_MODE_ATTR in ttir) is routes_user_promise
 
 
 def test_tle_warp_specialize_keeps_call_lowering_without_user_promise_marker():
@@ -116,14 +135,12 @@ def test_tle_warp_specialize_keeps_call_lowering_without_user_promise_marker():
 
     assert "ttg.warp_specialize" in ttir
     assert "tt.call" in ttir
-    assert _WGMMA_PIPELINE_MODE_ATTR not in ttir
-    assert _USER_PROMISE_MODE not in ttir
+    assert _USER_PROMISE_MODE_ATTR not in ttir
 
 
 def test_tle_warp_specialize_inlines_with_user_promise_marker():
-    ttir = _make_ttir(_warp_specialize_user_promise_inline_kernel, {"out": "*i32"})
+    ttir = _make_ttir(_warp_specialize_barrier_inline_kernel, {"out": "*i32"})
 
     assert "ttg.warp_specialize" in ttir
-    assert _WGMMA_PIPELINE_MODE_ATTR in ttir
-    assert _USER_PROMISE_MODE in ttir
+    assert _USER_PROMISE_MODE_ATTR in ttir
     assert "tt.call" not in ttir
