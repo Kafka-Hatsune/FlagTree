@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Experimental TLE FA3-style forward attention.
 
-* one producer task issues TMA loads for Q/K/V into shared memory
-* two replicated consumer tasks split the query block along M
+* one producer partition issues TMA loads for Q/K/V into shared memory
+* two explicit consumer partitions split the query block along M
 * mbarriers coordinate producer/consumer ownership of TMA buffers
 * named barriers serialize the two consumer WGMMA issue streams in a ping-pong pattern
 * K uses WGMMA descriptor transposition via ``wgmma(..., trans_b=True)``
@@ -72,6 +72,7 @@ def _attn_fwd_tle_ws_pipelined_pingpong_producer(
     NUM_BUFFERS_Q: tl.constexpr,
     NUM_BUFFERS_KV: tl.constexpr,
     BM_SPLIT: tl.constexpr,
+    CID: tl.constexpr,
 ):
     prog_id = tl.program_id(0)
     num_progs = tl.num_programs(0)
@@ -184,8 +185,9 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
     num_progs = tl.num_programs(0)
     num_pid_m = tl.cdiv(N_CTX, BLOCK_M)
     total_tiles = num_pid_m * Z * H
+    consumer_idx: tl.constexpr = CID - 1
 
-    if CID == 1:
+    if consumer_idx == 1:
         tle.gpu.barrier_arrive(ping_to_c0)
 
     tile_idx = prog_id
@@ -200,13 +202,13 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
         qk_scale = sm_scale * 1.44269504
 
         q_buf, q_phase_idx = _buf_phase(tile_count, NUM_BUFFERS_Q)
-        q_idx = q_buf + CID * NUM_BUFFERS_Q
+        q_idx = q_buf + consumer_idx * NUM_BUFFERS_Q
         tle.gpu.barrier_wait(q_fulls[q_idx], phaseIdx=q_phase_idx)
 
         kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
         tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
 
-        if CID == 0:
+        if consumer_idx == 0:
             tle.gpu.barrier_wait(ping_to_c0)
         else:
             tle.gpu.barrier_wait(ping_to_c1)
@@ -216,7 +218,7 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
             out_dtype=tl.float32,
             trans_b=True,
         )
-        if CID == 0:
+        if consumer_idx == 0:
             tle.gpu.barrier_arrive(ping_to_c1)
         else:
             tle.gpu.barrier_arrive(ping_to_c0)
@@ -236,7 +238,7 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
             kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
             tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
 
-            if CID == 0:
+            if consumer_idx == 0:
                 tle.gpu.barrier_wait(ping_to_c0)
             else:
                 tle.gpu.barrier_wait(ping_to_c1)
@@ -246,7 +248,7 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
                 out_dtype=tl.float32,
                 trans_b=True,
             )
-            if CID == 0:
+            if consumer_idx == 0:
                 tle.gpu.barrier_arrive(ping_to_c1)
             else:
                 tle.gpu.barrier_arrive(ping_to_c0)
@@ -284,11 +286,11 @@ def _attn_fwd_tle_ws_pipelined_pingpong_consumer(
         m_i += tl.math.log2(l_i)
         acc = acc / l_i[:, None]
 
-        offs_m = start_m * BLOCK_M + CID * BM_SPLIT + tl.arange(0, BM_SPLIT)
+        offs_m = start_m * BLOCK_M + consumer_idx * BM_SPLIT + tl.arange(0, BM_SPLIT)
         m_ptrs = m_ptr + off_hz * N_CTX + offs_m
         tl.store(m_ptrs, m_i)
 
-        desc_o.store((qo_offset_y + CID * BM_SPLIT, 0), acc.to(tl.float16))
+        desc_o.store((qo_offset_y + consumer_idx * BM_SPLIT, 0), acc.to(tl.float16))
 
         tile_idx += num_progs
         tile_count += 1
@@ -370,6 +372,7 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
     ping_to_c1 = pingpong[1]
 
     mma_warps: tl.constexpr = NUM_MMA_WARPS // NUM_MMA_GROUPS
+    # Pass partition CIDs explicitly: producer is 0, consumers start at 1.
     tle.gpu.warp_specialize(
         [
             (
@@ -390,34 +393,6 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
                     k_fulls,
                     v_empties,
                     v_fulls,
-                    HEAD_DIM,
-                    BLOCK_M,
-                    BLOCK_N,
-                    NUM_BUFFERS_Q,
-                    NUM_BUFFERS_KV,
-                    BM_SPLIT,
-                ),
-            ),
-            (
-                _attn_fwd_tle_ws_pipelined_pingpong_consumer,
-                (
-                    sm_scale,
-                    M,
-                    Z,
-                    H,
-                    desc_o,
-                    N_CTX,
-                    q_smem,
-                    k_smem,
-                    v_smem,
-                    q_empties,
-                    q_fulls,
-                    k_empties,
-                    k_fulls,
-                    v_empties,
-                    v_fulls,
-                    ping_to_c0,
-                    ping_to_c1,
                     HEAD_DIM,
                     BLOCK_M,
                     BLOCK_N,
@@ -454,6 +429,35 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
                     NUM_BUFFERS_KV,
                     BM_SPLIT,
                     1,
+                ),
+            ),
+            (
+                _attn_fwd_tle_ws_pipelined_pingpong_consumer,
+                (
+                    sm_scale,
+                    M,
+                    Z,
+                    H,
+                    desc_o,
+                    N_CTX,
+                    q_smem,
+                    k_smem,
+                    v_smem,
+                    q_empties,
+                    q_fulls,
+                    k_empties,
+                    k_fulls,
+                    v_empties,
+                    v_fulls,
+                    ping_to_c0,
+                    ping_to_c1,
+                    HEAD_DIM,
+                    BLOCK_M,
+                    BLOCK_N,
+                    NUM_BUFFERS_Q,
+                    NUM_BUFFERS_KV,
+                    BM_SPLIT,
+                    2,
                 ),
             ),
         ],

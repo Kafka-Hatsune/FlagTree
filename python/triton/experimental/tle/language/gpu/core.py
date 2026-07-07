@@ -1,6 +1,5 @@
 # flagtree tle
 import builtins
-import threading
 import triton.language.core as tl
 from typing import Optional, Sequence
 from enum import Enum
@@ -21,8 +20,6 @@ SHARED_MEMORY_ADDRESS_SPACE = 3
 _WGMMA_PIPELINE_MODE_ATTR = "tle.wgmma_pipeline_mode"
 _WGMMA_PIPELINE_MODE_USER_PROMISE = "user_promise"
 
-_async_task_state = threading.local()
-
 
 def _mark_wgmma_user_promise(_semantic, _generator):
     if _generator is None or _semantic is None:
@@ -38,80 +35,6 @@ def _is_wgmma_user_promise_marked(_generator):
         return False
     mode = _generator.module.get_operation().get_str_attr(_WGMMA_PIPELINE_MODE_ATTR)
     return mode == _WGMMA_PIPELINE_MODE_USER_PROMISE
-
-
-def _get_async_task_replica_id_stack():
-    if not hasattr(_async_task_state, "replica_id_stack"):
-        _async_task_state.replica_id_stack = []
-    return _async_task_state.replica_id_stack
-
-
-class async_task:
-    """
-    Producer/consumer task marker for ``async_tasks``.
-
-    ``async_task("producer")`` maps to the ``ttg.warp_specialize`` default
-    region. Unmarked tasks, or ``async_task("consumer")``, map to consumer
-    partition regions.
-    """
-
-    def __init__(self, *args, _builder=None, _semantic=None, **kwargs):
-        self.builder = _builder
-        role = "consumer"
-        if args:
-            if len(args) != 1:
-                raise ValueError("async_task accepts at most one positional role")
-            role = tl._unwrap_if_constexpr(args[0])
-            if role == "default":
-                # Compatibility with TLX-style spelling; TLE documents this as
-                # producer because the default region drives data movement.
-                role = "producer"
-        if role not in ("producer", "consumer"):
-            raise ValueError("async_task role must be 'producer' or 'consumer'")
-
-        self.role = role
-        self.is_producer = role == "producer"
-        self.is_consumer = role == "consumer"
-        self.name = tl._unwrap_if_constexpr(kwargs.get("name", role))
-        self.num_warps = tl._unwrap_if_constexpr(kwargs.get("num_warps", None))
-        self.num_regs = tl._unwrap_if_constexpr(kwargs.get("num_regs", kwargs.get("registers", None)))
-        self.replicate = tl._unwrap_if_constexpr(kwargs.get("replicate", 1))
-        if "warp_group_start_id" in kwargs:
-            raise ValueError("async_task warp_group_start_id is not supported")
-
-        if self.replicate is None or self.replicate < 1:
-            raise ValueError("async_task replicate must be a positive integer")
-        if self.is_producer and self.num_warps is not None:
-            raise ValueError("producer async_task uses the launch num_warps and must not specify num_warps")
-        if self.is_consumer and self.num_warps is None:
-            raise ValueError("consumer async_task requires num_warps")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
-
-
-class async_tasks:
-    """Container for producer/consumer async tasks."""
-
-    def __init__(self, _builder=None, _semantic=None):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
-
-
-@tl.builtin
-def async_task_replica_id(_semantic=None):
-    stack = _get_async_task_replica_id_stack()
-    if not stack:
-        raise ValueError("async_task_replica_id must be called inside an async_task region")
-    return tl.constexpr(stack[-1])
 
 
 class pipeline(range):
@@ -156,6 +79,19 @@ def _as_call_args(args):
         return arg
 
     return tuple(normalize(arg) for arg in args)
+
+
+def _as_warp_specialize_entry(entry, index: int):
+    entry = tl._unwrap_if_constexpr(entry)
+    if isinstance(entry, tl.tuple):
+        entry = tuple(entry.values)
+    if not isinstance(entry, tuple):
+        raise ValueError(f"warp_specialize entry {index} must be a tuple, got {type(entry).__name__}")
+    if len(entry) != 2:
+        raise ValueError(f"warp_specialize entry {index} must be (fn, args); pass cid as a normal constexpr arg")
+    if not isinstance(tl._unwrap_if_constexpr(entry[1]), (tuple, tl.tuple)):
+        raise ValueError(f"warp_specialize entry {index} args must be a tuple")
+    return entry
 
 
 def _as_result_values(results):
@@ -227,7 +163,7 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     else:
         call_jit_function = _generator.call_JitFunction
 
-    default_fn, default_args = functions_and_args[0]
+    default_fn, default_args = _as_warp_specialize_entry(functions_and_args[0], 0)
     default_args = _as_call_args(default_args)
     default_block = builder.create_block()
     builder.set_insertion_point_to_start(default_block)
@@ -238,7 +174,8 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     result_types = [result.get_type() for result in default_result_handles]
 
     worker_items = []
-    for worker_fn, worker_args in functions_and_args[1:]:
+    for idx, entry in enumerate(functions_and_args[1:], start=1):
+        worker_fn, worker_args = _as_warp_specialize_entry(entry, idx)
         worker_args = _as_call_args(worker_args)
         flattened = flatten_values_to_ir(worker_args)
         worker_items.append((worker_fn, worker_args, flattened))

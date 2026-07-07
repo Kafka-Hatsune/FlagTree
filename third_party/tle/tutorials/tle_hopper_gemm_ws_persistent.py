@@ -4,8 +4,8 @@
 This is a performance-oriented prototype that mirrors the simpler TLX
 ``hopper_gemm_ws.py`` structure:
 
-* one producer task issues TMA loads into staged shared-memory buffers
-* two consumer task replicas split the output tile along M
+* one producer partition issues TMA loads into staged shared-memory buffers
+* two explicit consumer partitions split the output tile along M
 * full/empty mbarriers coordinate producer/consumer ownership of each stage
 * WGMMA computes each half tile and descriptor stores write C
 
@@ -74,6 +74,7 @@ def _tle_ws_persistent_gemm_producer(
     GROUP_SIZE_M: tl.constexpr,
     NUM_STAGES: tl.constexpr,
     BM_SPLIT: tl.constexpr,
+    CID: tl.constexpr,
 ):
     sm_id = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BM)
@@ -152,18 +153,19 @@ def _tle_ws_persistent_gemm_consumer(
     num_pid_m = tl.cdiv(M, BM)
     num_pid_n = tl.cdiv(N, BN)
     num_tiles = num_pid_m * num_pid_n
+    consumer_idx: tl.constexpr = CID - 1
 
     tile_id = sm_id
     smem_count = 0
     while tile_id < num_tiles:
         pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-        off_m = pid_m * BM + CID * BM_SPLIT
+        off_m = pid_m * BM + consumer_idx * BM_SPLIT
         off_n = pid_n * BN
 
         acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
         if WGMMA_PIPELINE:
             buf, phase = _buf_phase(smem_count, NUM_STAGES)
-            a_idx = buf + CID * NUM_STAGES
+            a_idx = buf + consumer_idx * NUM_STAGES
 
             tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
             tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -176,7 +178,7 @@ def _tle_ws_persistent_gemm_consumer(
 
             for k_iter in range(1, tl.cdiv(K, BK)):
                 buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                a_idx = buf + CID * NUM_STAGES
+                a_idx = buf + consumer_idx * NUM_STAGES
 
                 tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
                 tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -196,7 +198,7 @@ def _tle_ws_persistent_gemm_consumer(
         else:
             for k_iter in range(0, tl.cdiv(K, BK)):
                 buf, phase = _buf_phase(smem_count, NUM_STAGES)
-                a_idx = buf + CID * NUM_STAGES
+                a_idx = buf + consumer_idx * NUM_STAGES
 
                 tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
                 tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -231,6 +233,7 @@ def _tle_ws_nonpersistent_gemm_producer(
     GROUP_SIZE_M: tl.constexpr,
     NUM_STAGES: tl.constexpr,
     BM_SPLIT: tl.constexpr,
+    CID: tl.constexpr,
 ):
     tile_id = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BM)
@@ -299,13 +302,14 @@ def _tle_ws_nonpersistent_gemm_consumer(
     num_pid_m = tl.cdiv(M, BM)
     num_pid_n = tl.cdiv(N, BN)
     pid_m, pid_n = _compute_pid(tile_id, num_pid_n, num_pid_m, GROUP_SIZE_M)
-    off_m = pid_m * BM + CID * BM_SPLIT
+    consumer_idx: tl.constexpr = CID - 1
+    off_m = pid_m * BM + consumer_idx * BM_SPLIT
     off_n = pid_n * BN
 
     acc = tl.zeros((BM_SPLIT, BN), dtype=tl.float32)
     if WGMMA_PIPELINE:
         buf, phase = _buf_phase(0, NUM_STAGES)
-        a_idx = buf + CID * NUM_STAGES
+        a_idx = buf + consumer_idx * NUM_STAGES
 
         tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
         tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -317,7 +321,7 @@ def _tle_ws_nonpersistent_gemm_consumer(
 
         for k_iter in range(1, tl.cdiv(K, BK)):
             buf, phase = _buf_phase(k_iter, NUM_STAGES)
-            a_idx = buf + CID * NUM_STAGES
+            a_idx = buf + consumer_idx * NUM_STAGES
 
             tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
             tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -336,7 +340,7 @@ def _tle_ws_nonpersistent_gemm_consumer(
     else:
         for k_iter in range(0, tl.cdiv(K, BK)):
             buf, phase = _buf_phase(k_iter, NUM_STAGES)
-            a_idx = buf + CID * NUM_STAGES
+            a_idx = buf + consumer_idx * NUM_STAGES
 
             tle.gpu.barrier_wait(full_a[a_idx], phaseIdx=phase)
             tle.gpu.barrier_wait(full_b[buf], phaseIdx=phase)
@@ -397,6 +401,7 @@ def _tle_ws_persistent_gemm_kernel(
         expect_bytes=BK * BN * 2,
     )
 
+    # Pass partition CIDs explicitly: producer is 0, consumers start at 1.
     tle.gpu.warp_specialize(
         [
             (
@@ -420,29 +425,6 @@ def _tle_ws_persistent_gemm_kernel(
                     GROUP_SIZE_M,
                     NUM_STAGES,
                     BM_SPLIT,
-                ),
-            ),
-            (
-                _tle_ws_persistent_gemm_consumer,
-                (
-                    a_smem,
-                    b_smem,
-                    empty_a,
-                    empty_b,
-                    full_a,
-                    full_b,
-                    c_desc,
-                    M,
-                    N,
-                    K,
-                    NUM_SMS,
-                    BM,
-                    BN,
-                    BK,
-                    GROUP_SIZE_M,
-                    NUM_STAGES,
-                    BM_SPLIT,
-                    WGMMA_PIPELINE,
                     0,
                 ),
             ),
@@ -468,6 +450,30 @@ def _tle_ws_persistent_gemm_kernel(
                     BM_SPLIT,
                     WGMMA_PIPELINE,
                     1,
+                ),
+            ),
+            (
+                _tle_ws_persistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    NUM_SMS,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    2,
                 ),
             ),
         ],
@@ -521,6 +527,7 @@ def _tle_ws_nonpersistent_gemm_kernel(
         expect_bytes=BK * BN * 2,
     )
 
+    # Pass partition CIDs explicitly: producer is 0, consumers start at 1.
     tle.gpu.warp_specialize(
         [
             (
@@ -543,28 +550,6 @@ def _tle_ws_nonpersistent_gemm_kernel(
                     GROUP_SIZE_M,
                     NUM_STAGES,
                     BM_SPLIT,
-                ),
-            ),
-            (
-                _tle_ws_nonpersistent_gemm_consumer,
-                (
-                    a_smem,
-                    b_smem,
-                    empty_a,
-                    empty_b,
-                    full_a,
-                    full_b,
-                    c_desc,
-                    M,
-                    N,
-                    K,
-                    BM,
-                    BN,
-                    BK,
-                    GROUP_SIZE_M,
-                    NUM_STAGES,
-                    BM_SPLIT,
-                    WGMMA_PIPELINE,
                     0,
                 ),
             ),
@@ -589,6 +574,29 @@ def _tle_ws_nonpersistent_gemm_kernel(
                     BM_SPLIT,
                     WGMMA_PIPELINE,
                     1,
+                ),
+            ),
+            (
+                _tle_ws_nonpersistent_gemm_consumer,
+                (
+                    a_smem,
+                    b_smem,
+                    empty_a,
+                    empty_b,
+                    full_a,
+                    full_b,
+                    c_desc,
+                    M,
+                    N,
+                    K,
+                    BM,
+                    BN,
+                    BK,
+                    GROUP_SIZE_M,
+                    NUM_STAGES,
+                    BM_SPLIT,
+                    WGMMA_PIPELINE,
+                    2,
                 ),
             ),
         ],
