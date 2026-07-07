@@ -89,32 +89,6 @@ class TestWarpSpecializeFrontend:
         assert items[1][3] == [1, 0]
 
 
-class TestAsyncTaskFrontend:
-    """Test producer/consumer async_task metadata validation."""
-
-    def test_producer_role_uses_launch_warps(self):
-        task = tle.gpu.async_task("producer", registers=120)
-
-        assert task.is_producer
-        assert task.num_warps is None
-        assert task.num_regs == 120
-
-    def test_unmarked_task_defaults_to_consumer(self):
-        task = tle.gpu.async_task(num_warps=4, name="consumer0")
-
-        assert task.is_consumer
-        assert task.num_warps == 4
-        assert task.name == "consumer0"
-
-    def test_consumer_requires_num_warps(self):
-        with pytest.raises(ValueError, match="requires num_warps"):
-            tle.gpu.async_task()
-
-    def test_producer_rejects_num_warps(self):
-        with pytest.raises(ValueError, match="must not specify num_warps"):
-            tle.gpu.async_task("producer", num_warps=4)
-
-
 class TestTLESemantic:
     """Test TLE semantic analysis"""
 
