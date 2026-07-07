@@ -64,16 +64,15 @@ static LogicalResult pipelineWgmma(ModuleOp moduleOp, unsigned numStages) {
   moduleOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
 
   for (scf::ForOp forOp : loops) {
-    if (getNumStagesOrDefault(forOp, numStages) < 1)
-      continue;
+    if (getNumStagesOrDefault(forOp, numStages) >= 1) {
 #ifdef __TLE__
-    if (mode == kTleWgmmaUserPromiseMode)
-      mlir::triton::gpu::detail::scheduleTleWgmmaUserPromisePipeline(forOp);
-    else
-      mlir::triton::asyncLaunchDots(forOp);
-#else
-    mlir::triton::asyncLaunchDots(forOp);
+      if (mode == kTleWgmmaUserPromiseMode) {
+        mlir::triton::gpu::detail::scheduleTleWgmmaUserPromisePipeline(forOp);
+        continue;
+      }
 #endif
+      mlir::triton::asyncLaunchDots(forOp);
+    }
   }
   return success();
 }
