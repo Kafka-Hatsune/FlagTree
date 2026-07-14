@@ -314,6 +314,11 @@ void init_triton_tle_ir(py::module &&m) {
               std::vector<int> &order) -> Value {
              return self.create<ttg::MemDescTransOp>(src, order);
            })
+      .def("create_memdesc_reshape",
+           [](TritonOpBuilder &self, Value src,
+              std::vector<int64_t> &shape) -> Value {
+             return self.create<ttg::MemDescReshapeOp>(src, shape);
+           })
       .def("create_barrier_alloc",
            [](TritonOpBuilder &self, Type resultType, int32_t numBarriers,
               int32_t arriveCount, int32_t initPolarity,
