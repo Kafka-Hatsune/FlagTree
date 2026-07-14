@@ -20,6 +20,8 @@
 
 # flagtree tle
 
+import math
+
 import triton.language.core as tl
 from typing import Optional, List, Tuple
 from abc import abstractmethod
@@ -283,6 +285,40 @@ def _make_slot_layout(src_layout: shared_layout, slot_shape: List[int]) -> share
     raise ValueError(f"buffered_tensor.slot does not support layout {type(src_layout).__name__}")
 
 
+def _make_reshape_layout(src_layout: shared_layout, dst_shape: List[int]) -> shared_layout:
+    """Rebuild an NV-MMA encoding when core reshape inference preserves it."""
+    rank = len(dst_shape)
+    if not isinstance(src_layout, nv_mma_shared_layout):
+        raise ValueError(
+            "buffered_tensor.reshape currently requires nv_mma_shared_layout; "
+            "other shared encodings lower to SharedLinearEncoding, which TLE "
+            "does not expose yet"
+        )
+    if any(value != 1 for value in (*src_layout.numCTAsPerCGA, *src_layout.numCTASplit)):
+        raise ValueError("buffered_tensor.reshape currently requires a single-CTA nv_mma_shared_layout")
+
+    src_rank = len(src_layout.shape)
+    row_major = src_layout.order == list(reversed(range(src_rank)))
+    column_major = src_layout.order == list(range(src_rank))
+    if not (row_major or column_major):
+        raise ValueError("buffered_tensor.reshape requires a canonical row- or column-major NV-MMA order")
+    src_inner = src_layout.shape[-1] if row_major else src_layout.shape[0]
+    dst_inner = dst_shape[-1] if row_major else dst_shape[0]
+    if src_inner != dst_inner:
+        raise ValueError("buffered_tensor.reshape must preserve the NV-MMA innermost dimension")
+
+    return nv_mma_shared_layout(
+        list(dst_shape),
+        list(reversed(range(rank))) if row_major else list(range(rank)),
+        src_layout.elemType,
+        [1] * rank,
+        [1] * rank,
+        list(reversed(range(rank))),
+        src_layout.fp4Padded,
+        src_layout.swizzled,
+    )
+
+
 class buffered_tensor(tl.base_value):
     """
     A symbolic type representing a tensor allocated in a manually managed buffer
@@ -343,6 +379,28 @@ class buffered_tensor(tl.base_value):
                                                              stage_tensor.handle)
         return buffered_tensor(slot_handle, self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
                                alloc_shape=slot_ty.alloc_shape)
+
+    @tl.builtin
+    def reshape(self, shape, _semantic=None):
+        """Return an aliasing shared-memory view with a different static shape."""
+        shape = [int(tl._unwrap_if_constexpr(dim)) for dim in tl._unwrap_if_constexpr(shape)]
+        if not shape or any(dim <= 0 for dim in shape):
+            raise ValueError(f"buffered_tensor.reshape dimensions must be positive, got {shape}")
+        if math.prod(shape) != math.prod(self.shape):
+            raise ValueError(
+                f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}"
+            )
+        handle = _semantic.builder.create_memdesc_reshape(self.handle, shape)
+        reshaped_layout = _make_reshape_layout(self.type.layout, shape)
+        return buffered_tensor(
+            handle,
+            self.dtype,
+            shape,
+            self.type.storage,
+            reshaped_layout,
+            _semantic,
+            alloc_shape=shape,
+        )
 
     def make_permute(self, handle, dims):
         permuted_layout = self.type.layout.make_permute(dims)
