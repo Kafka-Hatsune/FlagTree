@@ -847,6 +847,8 @@ def copy(
     shape,
     offsets: Sequence[constexpr | tensor] = None,
     barrier=None,
+    mask=None,
+    other=None,
     _semantic=None,
 ) -> None:
     """
@@ -879,6 +881,13 @@ def copy(
             to specify the starting coordinates within the tensor. Required for TMA copy.
         barrier: Optional TLE GPU mbarrier completion barrier for global-to-shared TMA copy.
             The barrier must come from ``tle.gpu.alloc_barrier(s)(expect_bytes=...)``.
+        mask: Optional elementwise mask for standard pointer-tensor copies. For
+            global-to-local copies, masked elements are written to local memory
+            using ``other``. For local-to-global copies, masked elements are not
+            stored. TMA descriptor copies do not accept a mask.
+        other: Value used for masked elements of a standard global-to-local
+            copy. TMA descriptor copies and local-to-global copies do not accept
+            ``other``.
         _semantic: Internal semantic analyzer for validation and compilation (user-provided)
 
     Raises:
@@ -897,6 +906,9 @@ def copy(
             bar = tle.gpu.alloc_barrier(expect_bytes=64 * 64 * 2)
             tle.copy(tma_desc, local_buf, [64, 64], [x_offset, y_offset], barrier=bar)
             tle.gpu.barrier_wait(bar, phaseIdx=0)
+
+        Masked global -> local copy with zero fill:
+            tle.copy(global_ptrs, local_buf, [64, 128], mask=valid, other=0.0)
     """
     mthreads_enabled = mthreads_copy.enabled()
     iluvatar_enabled = iluvatar_copy.enabled()
@@ -906,6 +918,8 @@ def copy(
         dst: tle.buffered_tensor,
         shape: tuple,
         direction,
+        mask=None,
+        other=None,
         _semantic=None,
     ) -> None:
         if mthreads_enabled:
@@ -921,8 +935,12 @@ def copy(
             import warnings
             warnings.warn("TLE semantic analysis module not available, skipping validation", UserWarning)
 
-        mask = None
-        other = None
+        mask = tl._unwrap_if_constexpr(mask)
+        other = tl._unwrap_if_constexpr(other)
+        if mask is not None:
+            mask = _semantic.to_tensor(mask)
+        if other is not None:
+            other = _semantic.to_tensor(other)
         boundary_check = ()
         padding_option = ""
         cache_modifier = ""
@@ -936,8 +954,13 @@ def copy(
                 tt_load = _semantic.load(src, mask, other, boundary_check, padding_option, cache_modifier,
                                          eviction_policy, volatile, *load_extra_args)
                 local_ptrs = local_ptr(dst, _make_full_indices(dst, _semantic), _semantic=_semantic)
-                _semantic.store(local_ptrs, tt_load, mask, boundary_check, cache_modifier, eviction_policy)
+                # Every local element is initialized. A false source mask is
+                # represented by the loaded ``other`` value rather than by
+                # suppressing the shared-memory store.
+                _semantic.store(local_ptrs, tt_load, None, boundary_check, cache_modifier, eviction_policy)
             else:
+                if other is not None:
+                    raise ValueError("copy other is only supported for global-to-local copies")
                 local_ptrs = local_ptr(src, _make_full_indices(src, _semantic), _semantic=_semantic)
                 load = tl.load(local_ptrs, _semantic=_semantic)
                 _semantic.store(dst, load, mask, boundary_check, cache_modifier, eviction_policy)
@@ -1047,7 +1070,9 @@ def copy(
     if is_normcopy:
         if barrier is not None:
             raise ValueError("copy barrier is only supported for TMA global-to-shared copy")
-        return normcopy(src, dst, shape, direction, _semantic)
+        return normcopy(src, dst, shape, direction, mask, other, _semantic)
+    if mask is not None or other is not None:
+        raise ValueError("copy mask and other are only supported for standard pointer-tensor copies")
     if mthreads_enabled:
         if barrier is not None:
             raise ValueError("TMA copy barrier is only supported on NVIDIA backend")
