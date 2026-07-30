@@ -291,7 +291,8 @@ def Tle_BarrierAllocOp : Tle_Op<"barrier.alloc"> {
     I32Attr:$num_barriers,
     I32Attr:$arrive_count,
     I32Attr:$init_polarity,
-    OptionalAttr<I32Attr>:$expect_bytes
+    OptionalAttr<I32Attr>:$expect_bytes,
+    DefaultValuedAttr<StrAttr, "\"elected\"">:$arrival_mode
   );
   let results = (outs TTG_MemDescType:$result);
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
