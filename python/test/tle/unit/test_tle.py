@@ -340,6 +340,7 @@ class TestTmaCopyBarrierFrontend:
             1,
             tle.gpu.PENDING,
             expect_bytes,
+            "elected",
             layout,
             semantic,
             shape=list(shape if shape is not None else [num_barriers, 1]),

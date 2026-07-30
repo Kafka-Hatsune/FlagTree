@@ -321,8 +321,8 @@ void init_triton_tle_ir(py::module &&m) {
            })
       .def("create_barrier_alloc",
            [](TritonOpBuilder &self, Type resultType, int32_t numBarriers,
-              int32_t arriveCount, int32_t initPolarity,
-              int32_t expectBytes) -> Value {
+              int32_t arriveCount, int32_t initPolarity, int32_t expectBytes,
+              const std::string &arrivalMode) -> Value {
              auto &builder = self.getBuilder();
              IntegerAttr expectBytesAttr;
              if (expectBytes > 0)
@@ -330,7 +330,8 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<tle::BarrierAllocOp>(
                  resultType, builder.getI32IntegerAttr(numBarriers),
                  builder.getI32IntegerAttr(arriveCount),
-                 builder.getI32IntegerAttr(initPolarity), expectBytesAttr);
+                 builder.getI32IntegerAttr(initPolarity), expectBytesAttr,
+                 builder.getStringAttr(arrivalMode));
            })
       .def("create_barrier_wait_mbarrier",
            [](TritonOpBuilder &self, Value barrier, Value phase) -> void {

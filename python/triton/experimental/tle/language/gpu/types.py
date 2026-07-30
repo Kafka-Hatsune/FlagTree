@@ -289,11 +289,9 @@ def _make_reshape_layout(src_layout: shared_layout, dst_shape: List[int]) -> sha
     """Rebuild an NV-MMA encoding when core reshape inference preserves it."""
     rank = len(dst_shape)
     if not isinstance(src_layout, nv_mma_shared_layout):
-        raise ValueError(
-            "buffered_tensor.reshape currently requires nv_mma_shared_layout; "
-            "other shared encodings lower to SharedLinearEncoding, which TLE "
-            "does not expose yet"
-        )
+        raise ValueError("buffered_tensor.reshape currently requires nv_mma_shared_layout; "
+                         "other shared encodings lower to SharedLinearEncoding, which TLE "
+                         "does not expose yet")
     if any(value != 1 for value in (*src_layout.numCTAsPerCGA, *src_layout.numCTASplit)):
         raise ValueError("buffered_tensor.reshape currently requires a single-CTA nv_mma_shared_layout")
 
@@ -387,9 +385,7 @@ class buffered_tensor(tl.base_value):
         if not shape or any(dim <= 0 for dim in shape):
             raise ValueError(f"buffered_tensor.reshape dimensions must be positive, got {shape}")
         if math.prod(shape) != math.prod(self.shape):
-            raise ValueError(
-                f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}"
-            )
+            raise ValueError(f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}")
         handle = _semantic.builder.create_memdesc_reshape(self.handle, shape)
         reshaped_layout = _make_reshape_layout(self.type.layout, shape)
         return buffered_tensor(
@@ -515,6 +511,7 @@ class barrier(tl.base_value):
         arrive_count: int,
         init: str,
         expect_bytes: Optional[int],
+        arrival_mode: str,
         layout: shared_layout,
         semantic: TritonSemantic,
         *,
@@ -529,13 +526,15 @@ class barrier(tl.base_value):
         self.arrive_count = arrive_count
         self.init = init
         self.expect_bytes = expect_bytes
+        self.arrival_mode = arrival_mode
         self.layout = layout
         self.static_index = static_index
         self.named_base_id = named_base_id
         self.allocation_key = allocation_key
         self.shape = list(shape if shape is not None else [num_barriers, 1])
-        self.type = barrier_type(num_barriers, arrive_count, init, expect_bytes, layout, semantic, shape=self.shape,
-                                 static_index=static_index, named_base_id=named_base_id, allocation_key=allocation_key)
+        self.type = barrier_type(num_barriers, arrive_count, init, expect_bytes, arrival_mode, layout, semantic,
+                                 shape=self.shape, static_index=static_index, named_base_id=named_base_id,
+                                 allocation_key=allocation_key)
 
     @property
     def is_slot(self) -> bool:
@@ -563,14 +562,14 @@ class barrier(tl.base_value):
             index_tensor = index_tensor.to(tl.int32, _semantic=_semantic)
 
         slot_layout = _make_slot_layout(self.layout, [1])
-        slot_ty = barrier_type(self.num_barriers, self.arrive_count, self.init, self.expect_bytes, slot_layout,
-                               _semantic, shape=[1], static_index=static_index, named_base_id=self.named_base_id,
-                               allocation_key=self.allocation_key)
+        slot_ty = barrier_type(self.num_barriers, self.arrive_count, self.init, self.expect_bytes, self.arrival_mode,
+                               slot_layout, _semantic, shape=[1], static_index=static_index,
+                               named_base_id=self.named_base_id, allocation_key=self.allocation_key)
         slot_handle = _semantic.builder.create_memdesc_index(slot_ty.to_ir(_semantic.builder), self.handle,
                                                              index_tensor.handle)
-        return barrier(slot_handle, self.num_barriers, self.arrive_count, self.init, self.expect_bytes, slot_layout,
-                       _semantic, shape=[1], static_index=static_index, named_base_id=self.named_base_id,
-                       allocation_key=self.allocation_key)
+        return barrier(slot_handle, self.num_barriers, self.arrive_count, self.init, self.expect_bytes,
+                       self.arrival_mode, slot_layout, _semantic, shape=[1], static_index=static_index,
+                       named_base_id=self.named_base_id, allocation_key=self.allocation_key)
 
 
 class barrier_type(tl.block_type):
@@ -581,6 +580,7 @@ class barrier_type(tl.block_type):
         arrive_count: int,
         init: str,
         expect_bytes: Optional[int],
+        arrival_mode: str,
         layout: shared_layout,
         semantic: TritonSemantic,
         *,
@@ -593,6 +593,7 @@ class barrier_type(tl.block_type):
         self.arrive_count = arrive_count
         self.init = init
         self.expect_bytes = expect_bytes
+        self.arrival_mode = arrival_mode
         self.layout = layout
         self.semantic = semantic
         self.shape = list(shape if shape is not None else [num_barriers, 1])
@@ -608,6 +609,7 @@ class barrier_type(tl.block_type):
             self.arrive_count,
             self.init,
             self.expect_bytes,
+            self.arrival_mode,
             self.layout,
             self.semantic,
             shape=self.shape,
@@ -634,17 +636,19 @@ class barrier_type(tl.block_type):
         expect = "none" if self.expect_bytes is None else str(self.expect_bytes)
         index = "array" if self.static_index is None else str(self.static_index)
         shape = "_".join(map(str, self.shape))
-        return f"barrier_{shape}_{self.num_barriers}_{self.arrive_count}_{self.init}_{expect}_{index}_{self.named_base_id}"
+        return (f"barrier_{shape}_{self.num_barriers}_{self.arrive_count}_{self.init}_{expect}_"
+                f"{self.arrival_mode}_{index}_{self.named_base_id}")
 
     def __str__(self) -> str:
         return (f"barrier<{self.shape}, arrive_count={self.arrive_count}, init={self.init}, "
-                f"expect_bytes={self.expect_bytes}>")
+                f"expect_bytes={self.expect_bytes}, arrival_mode={self.arrival_mode}>")
 
     def __eq__(self, other) -> bool:
         return (type(self) is type(other) and self.shape == other.shape and self.num_barriers == other.num_barriers
                 and self.arrive_count == other.arrive_count and self.init == other.init
                 and self.expect_bytes == other.expect_bytes and self.layout == other.layout
-                and self.static_index == other.static_index and self.named_base_id == other.named_base_id)
+                and self.arrival_mode == other.arrival_mode and self.static_index == other.static_index
+                and self.named_base_id == other.named_base_id)
 
 
 class pipe_slot_type(tl.base_type):

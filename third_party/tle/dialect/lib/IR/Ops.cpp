@@ -325,7 +325,12 @@ LogicalResult BarrierAllocOp::verify() {
           getOperation()->getAttrOfType<IntegerAttr>("expect_bytes")) {
     if (expectBytes.getInt() <= 0)
       return emitOpError("expect_bytes must be positive when present");
+    if (getArrivalMode() == "participant")
+      return emitOpError(
+          "arrival_mode 'participant' does not support expect_bytes");
   }
+  if (getArrivalMode() != "elected" && getArrivalMode() != "participant")
+    return emitOpError("arrival_mode must be 'elected' or 'participant'");
   return success();
 }
 
