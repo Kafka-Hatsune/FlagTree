@@ -309,6 +309,12 @@ void init_triton_tle_ir(py::module &&m) {
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
            })
+      .def("create_memdesc_wgmma_view",
+           [](TritonOpBuilder &self, Type resultType, Value src,
+              std::vector<int32_t> order) -> Value {
+             return self.create<tle::MemDescWGMMAViewOp>(resultType, src,
+                                                         order);
+           })
       .def("create_memdesc_trans",
            [](TritonOpBuilder &self, Value src,
               std::vector<int> &order) -> Value {

@@ -25,6 +25,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -32,6 +33,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include <cctype>
 #include <limits>
+#include <optional>
 
 #include "tle/dialect/include/IR/VerfiyUtils.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -248,15 +250,47 @@ LogicalResult WGMMAOp::verify() {
   if (dShape != cShape)
     return emitOpError("expects result shape to match accumulator shape");
 
+  Type aElemType = aType.getElementType();
+  Type bElemType = bType.getElementType();
+  std::optional<int64_t> instructionK = getWGMMAInstructionK(aElemType);
+  if (!instructionK ||
+      !isSupportedWGMMATypeCombination(aElemType, bElemType,
+                                       cType.getElementType(),
+                                       getInputPrecision()))
+    return emitOpError(
+        "has an unsupported Hopper WGMMA operand, accumulator, or input "
+        "precision combination");
+
   if (aShape[0] < 64 || aShape[0] % 64 != 0)
     return emitOpError("expects M dimension to be divisible by 64");
   if (bShape[1] < 8 || bShape[1] % 8 != 0)
     return emitOpError("expects N dimension to be divisible by 8");
-  if (aShape[1] < 16)
-    return emitOpError("expects K dimension to be at least 16");
+  if (aShape[1] < *instructionK)
+    return emitOpError("expects K dimension to contain at least one WGMMA "
+                       "instruction for its operand type");
 
   IntegerAttr activeN = getActiveNAttr();
   IntegerAttr activeK = getActiveKAttr();
+  ExactSMEMStage tiledBStage = getExactSMEMStage(getB());
+  ExactSMEMStage tiledAStage;
+  if (isa<triton::gpu::MemDescType>(getA().getType()))
+    tiledAStage = getExactSMEMStage(getA());
+  if (tiledAStage)
+    return emitOpError(
+        "does not permit a tiled SMEM stage as the WGMMA A operand");
+  if (tiledBStage && !tiledBStage.transposed &&
+      !supportsWGMMAOperandTranspose(bElemType))
+    return emitOpError(
+        "TF32, FP8, and int8 tiled B require a transposed logical view so "
+        "WGMMA consumes a column-major descriptor without PTX transpose "
+        "operands");
+  if (tiledBStage && !activeN && !activeK) {
+    if (tiledBStage.getLogicalK() != tiledBStage.getCarrierK() ||
+        tiledBStage.getLogicalN() != tiledBStage.getCarrierN())
+      return emitOpError(
+          "fragmented tiled SMEM stage requires active_n or active_k");
+    return success();
+  }
   if (!activeN && !activeK)
     return success();
   if (activeN && activeK)
@@ -264,17 +298,17 @@ LogicalResult WGMMAOp::verify() {
   SmallVector<int64_t> cShapePerCTA =
       cType.getEncoding() ? triton::gpu::getShapePerCTA(cType)
                           : SmallVector<int64_t>(cShape);
-  if (activeN && activeN.getInt() == cShapePerCTA[1])
+  if (activeN && !tiledBStage && activeN.getInt() == cShapePerCTA[1])
     return success();
-  if (activeK && activeK.getInt() == aShape[1])
+  if (activeK && !tiledBStage && activeK.getInt() == aShape[1])
     return success();
 
-  Type aElemType = aType.getElementType();
-  Type bElemType = bType.getElementType();
-  if (!isa<Float16Type, BFloat16Type>(aElemType) ||
-      aElemType != bElemType || !cType.getElementType().isF32())
-    return emitOpError("active extents require matching f16 or bf16 A/B "
-                       "operands and an f32 accumulator");
+  if (!isSupportedActiveWGMMATypeCombination(
+          aElemType, bElemType, cType.getElementType(),
+          getInputPrecision()))
+    return emitOpError(
+        "active extents require a supported Hopper WGMMA type combination "
+        "with a 32-bit accumulator");
   if (aShape[0] != 64)
     return emitOpError("active extents currently require physical M=64");
 
@@ -284,29 +318,69 @@ LogicalResult WGMMAOp::verify() {
       return emitOpError("active_n must be a positive multiple of 8");
     if (activeNValue > bShape[1])
       return emitOpError("active_n exceeds the physical N carrier");
-    if (bShape[1] > 256)
+    int64_t maxInstructionN = aElemType.isInteger(8) ? 224 : 256;
+    if (bShape[1] > maxInstructionN)
       return emitOpError(
-          "active_n requires a single physical N carrier no greater than 256");
+          "active_n physical N carrier exceeds the WGMMA type limit");
     if (getOperation()->hasAttr("tle.wgmma_accumulator_chain_c"))
       return emitOpError(
           "active_n does not support tle.wgmma_accumulator_chain_c");
     if (!isa<triton::gpu::MemDescType>(getA().getType()))
       return emitOpError("active_n requires a shared-memory A operand");
+    if (tiledBStage) {
+      if (activeNValue != tiledBStage.getLogicalN())
+        return emitOpError(
+            "active_n must equal the tiled stage logical N extent");
+      if (tiledBStage.getLogicalK() != tiledBStage.getCarrierK() ||
+          bShape[0] != tiledBStage.getCarrierK() ||
+          bShape[1] != tiledBStage.getCarrierN() ||
+          aShape[1] != tiledBStage.getCarrierK())
+        return emitOpError(
+            "active_n carrier shape does not match the tiled stage");
+      int64_t storageTileN = tiledBStage.transposed
+                                 ? tiledBStage.getStorageTileRows()
+                                 : tiledBStage.getStorageTileCols();
+      if (storageTileN % 8 != 0)
+        return emitOpError(
+            "active_n storage tile must select complete WGMMA N8 groups");
+    }
   }
 
   if (activeK) {
     int64_t activeKValue = activeK.getInt();
-    if (activeKValue <= 0 || activeKValue % 16 != 0)
-      return emitOpError("active_k must be a positive multiple of 16");
+    if (activeKValue <= 0 || activeKValue % *instructionK != 0)
+      return emitOpError(
+          "active_k must be a positive multiple of the operand type's "
+          "WGMMA instruction K");
     if (activeKValue > aShape[1])
       return emitOpError("active_k exceeds the physical K carrier");
-    if (aShape[1] % 16 != 0)
-      return emitOpError("active_k requires physical K divisible by 16");
-    int64_t physicalSplits = aShape[1] / 16;
+    if (aShape[1] % *instructionK != 0)
+      return emitOpError(
+          "active_k requires physical K divisible by the WGMMA instruction "
+          "K");
+    int64_t physicalSplits = aShape[1] / *instructionK;
     if ((physicalSplits & (physicalSplits - 1)) != 0)
       return emitOpError(
           "active_k physical carrier must contain a power-of-two number of "
-          "K16 instructions");
+          "WGMMA K instructions");
+    if (tiledBStage) {
+      if (activeKValue != tiledBStage.getLogicalK())
+        return emitOpError(
+            "active_k must equal the tiled stage logical K extent");
+      if (tiledBStage.getLogicalN() != tiledBStage.getCarrierN() ||
+          aShape[1] != tiledBStage.getCarrierK() ||
+          bShape[0] != tiledBStage.getCarrierK() ||
+          bShape[1] != tiledBStage.getCarrierN())
+        return emitOpError(
+            "active_k carrier shape does not match the tiled stage");
+      int64_t storageTileK = tiledBStage.transposed
+                                 ? tiledBStage.getStorageTileCols()
+                                 : tiledBStage.getStorageTileRows();
+      if (storageTileK % *instructionK != 0)
+        return emitOpError(
+            "active_k storage tile must select complete WGMMA K "
+            "instructions");
+    }
   }
   return success();
 }

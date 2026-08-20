@@ -45,11 +45,86 @@ static constexpr llvm::StringLiteral
     kTleWgmmaActiveNAttr("tle.wgmma_active_n");
 static constexpr llvm::StringLiteral
     kTleWgmmaActiveKAttr("tle.wgmma_active_k");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMOperandBAttr("tle.tiled_smem_operand_b");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMLogicalRowsAttr("tle.tiled_smem_logical_rows");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMLogicalColsAttr("tle.tiled_smem_logical_cols");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMStorageTileShapeAttr(
+        "tle.tiled_smem_storage_tile_shape");
 
 struct TleWgmmaOperand {
   Value value;
   std::optional<int64_t> descriptorImm;
 };
+
+static LinearLayout
+getTleTiledSMEMLoaderLayout(triton::gpu::MemDescType bTensorTy,
+                            int64_t logicalRows, int64_t logicalCols,
+                            int64_t storageTileRows,
+                            int64_t storageTileCols) {
+  auto shape = bTensorTy.getShape();
+  auto nvmma = cast<triton::gpu::NVMMASharedEncodingAttr>(
+      bTensorTy.getEncoding());
+  bool transposed = nvmma.getTransposed();
+  int64_t physicalRows = llvm::PowerOf2Ceil(logicalRows);
+  int64_t physicalCols = llvm::PowerOf2Ceil(logicalCols);
+  SmallVector<int64_t> expectedShape =
+      transposed ? SmallVector<int64_t>{physicalCols, physicalRows}
+                 : SmallVector<int64_t>{physicalRows, physicalCols};
+  assert(shape == ArrayRef<int64_t>(expectedShape) &&
+         "tiled SMEM B must be a direct or transposed carrier");
+
+  SmallVector<int64_t> storageTileShape =
+      transposed
+          ? SmallVector<int64_t>{storageTileCols, storageTileRows}
+          : SmallVector<int64_t>{storageTileRows, storageTileCols};
+  SmallVector<unsigned, 2> storageTileOrder =
+      transposed ? SmallVector<unsigned, 2>{0, 1}
+                 : SmallVector<unsigned, 2>{1, 0};
+  auto storageTileEncoding =
+      triton::gpu::NVMMASharedEncodingAttr::get(
+          bTensorTy.getContext(), storageTileShape, storageTileOrder,
+          nvmma.getCTALayout(), bTensorTy.getElementType(),
+          nvmma.getFp4Padded());
+  auto storageTileType = triton::gpu::MemDescType::get(
+      storageTileShape, bTensorTy.getElementType(), storageTileEncoding,
+      bTensorTy.getMemorySpace(), bTensorTy.getMutableMemory());
+  LinearLayout layout = toLinearLayout(storageTileType).pseudoinvert();
+
+  return layout;
+}
+
+static DotOpMmaSmemLoader buildTleTiledSMEMLoader(
+    Location loc, RewriterBase &rewriter,
+    triton::gpu::MemDescType bTensorTy, Value smemBase,
+    int64_t logicalRows, int64_t logicalCols, int64_t storageTileRows,
+    int64_t storageTileCols, ArrayRef<unsigned> instrShape,
+    RankedTensorType mmaType) {
+  LinearLayout layout = getTleTiledSMEMLoaderLayout(
+      bTensorTy, logicalRows, logicalCols, storageTileRows, storageTileCols);
+  auto mmaEncoding = cast<triton::gpu::NvidiaMmaEncodingAttr>(
+      mmaType.getEncoding());
+  RankedTensorType descriptorMmaType = mmaType;
+  if (instrShape[1] != mmaEncoding.getInstrShape()[1]) {
+    SmallVector<unsigned> descriptorInstrShape(mmaEncoding.getInstrShape());
+    descriptorInstrShape[1] = instrShape[1];
+    auto descriptorMmaEncoding = triton::gpu::NvidiaMmaEncodingAttr::get(
+        mmaType.getContext(), mmaEncoding.getVersionMajor(),
+        mmaEncoding.getVersionMinor(), mmaEncoding.getWarpsPerCTA(),
+        mmaEncoding.getCTALayout(), descriptorInstrShape);
+    SmallVector<int64_t> descriptorMmaShape(mmaType.getShape());
+    descriptorMmaShape[1] = instrShape[1];
+    descriptorMmaType = RankedTensorType::get(
+        descriptorMmaShape, mmaType.getElementType(), descriptorMmaEncoding);
+  }
+  unsigned elementBitWidth = bTensorTy.getElementTypeBitWidth();
+  return DotOpMmaSmemLoader::build(
+      loc, rewriter, layout, elementBitWidth, smemBase, instrShape,
+      /*MNdim=*/1, /*mmaVersion=*/3, descriptorMmaType);
+}
 #endif
 
 triton::nvgpu::WGMMAEltType getMmaRetType(Value d) {
@@ -212,14 +287,23 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   auto dTensorTy = cast<RankedTensorType>(d.getType());
   bool aInShared = isa<SharedEncodingTrait>(aTensorTy.getEncoding());
   auto mmaEncoding = cast<NvidiaMmaEncodingAttr>(dTensorTy.getEncoding());
+  bool tiledSMEMOperandB = op->hasAttr(kTleTiledSMEMOperandBAttr);
   std::optional<SharedMemoryObject> smemObjA;
   Value baseA;
   if (aInShared) {
     baseA = getOffsetedBase(loadedA, cast<MemDescType>(aTensorTy),
                             typeConverter, rewriter, loc);
   }
-  auto baseB = getOffsetedBase(loadedB, cast<MemDescType>(bTensorTy),
-                               typeConverter, rewriter, loc);
+  Value baseB;
+  if (tiledSMEMOperandB) {
+    auto llvmElemTy = typeConverter->convertType(bTensorTy.getElementType());
+    baseB = LLVM::getSharedMemoryObjectFromStruct(loc, loadedB, llvmElemTy,
+                                                  rewriter)
+                .getBase();
+  } else {
+    baseB = getOffsetedBase(loadedB, cast<MemDescType>(bTensorTy),
+                            typeConverter, rewriter, loc);
+  }
   auto dShapePerCTA = getShapePerCTA(dTensorTy);
   auto instrMNK = mmaEncoding.getInstrShape();
   unsigned physicalN = instrMNK[1];
@@ -234,6 +318,49 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   if (activeNAttr && activeKAttr)
     return op->emitOpError(
         "tle.wgmma_active_n and tle.wgmma_active_k cannot be combined");
+  IntegerAttr tiledSMEMLogicalRowsAttr =
+      op->getAttrOfType<IntegerAttr>(kTleTiledSMEMLogicalRowsAttr);
+  IntegerAttr tiledSMEMLogicalColsAttr =
+      op->getAttrOfType<IntegerAttr>(kTleTiledSMEMLogicalColsAttr);
+  DenseI32ArrayAttr tiledSMEMStorageTileShapeAttr =
+      op->getAttrOfType<DenseI32ArrayAttr>(
+          kTleTiledSMEMStorageTileShapeAttr);
+  if (tiledSMEMOperandB &&
+      (!tiledSMEMLogicalRowsAttr || !tiledSMEMLogicalColsAttr ||
+       !tiledSMEMStorageTileShapeAttr ||
+       tiledSMEMStorageTileShapeAttr.size() != 2))
+    return op->emitOpError(
+        "tiled SMEM operand B requires logical extents and a two-dimensional "
+        "storage tile shape");
+  int64_t tiledSMEMStorageTileRows = 0;
+  int64_t tiledSMEMStorageTileCols = 0;
+  if (tiledSMEMOperandB) {
+    ArrayRef<int32_t> storageTileShape =
+        tiledSMEMStorageTileShapeAttr.asArrayRef();
+    tiledSMEMStorageTileRows = storageTileShape[0];
+    tiledSMEMStorageTileCols = storageTileShape[1];
+    if (tiledSMEMStorageTileRows <= 0 || tiledSMEMStorageTileCols <= 0 ||
+        tiledSMEMLogicalRowsAttr.getInt() % tiledSMEMStorageTileRows != 0 ||
+        tiledSMEMLogicalColsAttr.getInt() % tiledSMEMStorageTileCols != 0)
+      return op->emitOpError(
+          "tiled SMEM storage tile must divide its logical extents");
+  }
+  if (tiledSMEMOperandB && (activeNAttr || activeKAttr)) {
+    auto nvmma = cast<triton::gpu::NVMMASharedEncodingAttr>(
+        bTensorTy.getEncoding());
+    int64_t logicalK = nvmma.getTransposed()
+                           ? tiledSMEMLogicalColsAttr.getInt()
+                           : tiledSMEMLogicalRowsAttr.getInt();
+    int64_t logicalN = nvmma.getTransposed()
+                           ? tiledSMEMLogicalRowsAttr.getInt()
+                           : tiledSMEMLogicalColsAttr.getInt();
+    if (activeKAttr && activeKAttr.getInt() != logicalK)
+      return op->emitOpError(
+          "tle.wgmma_active_k must equal the tiled SMEM logical K extent");
+    if (activeNAttr && activeNAttr.getInt() != logicalN)
+      return op->emitOpError(
+          "tle.wgmma_active_n must equal the tiled SMEM logical N extent");
+  }
   if (activeNAttr) {
     assert(activeNAttr.getInt() > 0 && activeNAttr.getInt() % 8 == 0 &&
            activeNAttr.getInt() <= physicalN &&
@@ -284,9 +411,39 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   } else {
     structA = unpackLLElements(loc, loadedA, rewriter);
   }
-  DotOpMmaSmemLoader bLoader = DotOpMmaSmemLoader::build(
-      loc, rewriter, bTensorTy, baseB, {K, physicalN}, 1, 3, false,
-      dTensorTy);
+  DotOpMmaSmemLoader bLoader;
+  bool tiledSMEMTransposed = false;
+  unsigned tiledSMEMTileK = 0;
+  unsigned tiledSMEMTileN = 0;
+  if (tiledSMEMOperandB) {
+    auto nvmma = cast<triton::gpu::NVMMASharedEncodingAttr>(
+        bTensorTy.getEncoding());
+    tiledSMEMTransposed = nvmma.getTransposed();
+    tiledSMEMTileK = tiledSMEMTransposed ? tiledSMEMStorageTileCols
+                                        : tiledSMEMStorageTileRows;
+    tiledSMEMTileN = tiledSMEMTransposed ? tiledSMEMStorageTileRows
+                                        : tiledSMEMStorageTileCols;
+    if (activeNAttr &&
+        (tiledSMEMTileN < 8 || tiledSMEMTileN % 8 != 0))
+      return op->emitOpError(
+          "active-N tiled SMEM requires storage tiles containing complete "
+          "WGMMA N8 groups");
+    if (activeKAttr &&
+        (tiledSMEMTileK < mmaSizeK || tiledSMEMTileK % mmaSizeK != 0))
+      return op->emitOpError(
+          "active-K tiled SMEM requires storage tiles containing complete "
+          "WGMMA K instructions");
+    unsigned instructionN = activeNAttr ? tiledSMEMTileN : physicalN;
+    bLoader = buildTleTiledSMEMLoader(
+        loc, rewriter, bTensorTy, baseB,
+        tiledSMEMLogicalRowsAttr.getInt(),
+        tiledSMEMLogicalColsAttr.getInt(), tiledSMEMStorageTileRows,
+        tiledSMEMStorageTileCols, {K, instructionN}, dTensorTy);
+  } else {
+    bLoader = DotOpMmaSmemLoader::build(
+        loc, rewriter, bTensorTy, baseB, {K, physicalN}, 1, 3, false,
+        dTensorTy);
+  }
   bool transB = !bLoader.getDescriptor().transposed;
 
   SmallVector<Value> fc;
@@ -297,10 +454,27 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   triton::nvgpu::WGMMAEltType eltTypeA = getMmaOperandType(a, allowTF32);
   triton::nvgpu::WGMMAEltType eltTypeB = getMmaOperandType(b, allowTF32);
 
+  bool supportsTransposeOperands =
+      (eltTypeA == triton::nvgpu::WGMMAEltType::f16 &&
+       eltTypeB == triton::nvgpu::WGMMAEltType::f16) ||
+      (eltTypeA == triton::nvgpu::WGMMAEltType::bf16 &&
+       eltTypeB == triton::nvgpu::WGMMAEltType::bf16);
+  if (!supportsTransposeOperands && (transA || transB))
+    return op->emitOpError(
+        "TF32, FP8, and int8 WGMMA require row-major A and column-major B "
+        "descriptors because their PTX instructions have no transpose "
+        "operands");
+
   triton::nvgpu::WGMMALayout layoutA = transA ? triton::nvgpu::WGMMALayout::col
                                               : triton::nvgpu::WGMMALayout::row;
   triton::nvgpu::WGMMALayout layoutB = transB ? triton::nvgpu::WGMMALayout::row
                                               : triton::nvgpu::WGMMALayout::col;
+
+  bool splitTiledActiveN =
+      tiledSMEMOperandB && activeNAttr && tiledSMEMTileN < N;
+  unsigned wgmmaInstructionN = splitTiledActiveN ? tiledSMEMTileN : N;
+  unsigned activeNFragments = splitTiledActiveN ? N / tiledSMEMTileN : 1;
+  unsigned instructionAccSize = 2 * (wgmmaInstructionN / 4);
 
   auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
   // TLE kernels often carry extra live values around WGMMA regions. Keep all
@@ -315,33 +489,37 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   SmallVector<Value> initialUseC;
   for (int m = 0; m < numRepM; ++m) {
     for (int n = 0; n < numRepN; ++n) {
-      Value d;
-      Value useC;
-      LLVM::LLVMStructType accTy;
-      if (reuseAccumulatorChainC && !activeNAttr) {
-        accTy = cast<LLVM::LLVMStructType>(loadedC.getType());
-        d = loadedC;
-        useC = tb.i1_val(1);
-      } else {
-        llvm::SmallVector<Value> mmaOut = loadReg(
-            rewriter, loc, fc,
-            (m * numRepN + n) * physicalAccSize, wgmmaAccSize, op);
-        llvm::SmallVector<Type> elemTypes;
-        for (Value accEl : mmaOut)
-          elemTypes.push_back(accEl.getType());
-        accTy =
-            LLVM::LLVMStructType::getLiteral(rewriter.getContext(), elemTypes);
-        useC = tb.i1_val(0);
-        if (!zeroAcc) {
-          d = packLLElements(loc, typeConverter, mmaOut, rewriter, accTy);
+      for (unsigned fragment = 0; fragment < activeNFragments; ++fragment) {
+        Value d;
+        Value useC;
+        LLVM::LLVMStructType accTy;
+        if (reuseAccumulatorChainC && !activeNAttr) {
+          accTy = cast<LLVM::LLVMStructType>(loadedC.getType());
+          d = loadedC;
           useC = tb.i1_val(1);
+        } else {
+          llvm::SmallVector<Value> mmaOut = loadReg(
+              rewriter, loc, fc,
+              (m * numRepN + n) * physicalAccSize +
+                  fragment * instructionAccSize,
+              instructionAccSize, op);
+          llvm::SmallVector<Type> elemTypes;
+          for (Value accEl : mmaOut)
+            elemTypes.push_back(accEl.getType());
+          accTy = LLVM::LLVMStructType::getLiteral(rewriter.getContext(),
+                                                   elemTypes);
+          useC = tb.i1_val(0);
+          if (!zeroAcc) {
+            d = packLLElements(loc, typeConverter, mmaOut, rewriter, accTy);
+            useC = tb.i1_val(1);
+          }
         }
+        if (useCOperand)
+          useC = tb.and_(useC, useCOperand);
+        accTypes.push_back(accTy);
+        initialAccumulators.push_back(d);
+        initialUseC.push_back(useC);
       }
-      if (useCOperand)
-        useC = tb.and_(useC, useCOperand);
-      accTypes.push_back(accTy);
-      initialAccumulators.push_back(d);
-      initialUseC.push_back(useC);
     }
   }
 
@@ -372,7 +550,32 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   };
 
   auto buildSharedB = [&](int k, int n) -> TleWgmmaOperand {
-    LocalizedSMEMDescriptor desc = bLoader.localizedSmemLoad(k, n);
+    if (!tiledSMEMOperandB) {
+      LocalizedSMEMDescriptor desc = bLoader.localizedSmemLoad(k, n);
+      return {desc.baseb128, desc.descriptorImm};
+    }
+
+    int64_t elementBytes = bTensorTy.getElementTypeBitWidth() / 8;
+    int64_t tileBytes = tiledSMEMStorageTileRows *
+                        tiledSMEMStorageTileCols * elementBytes;
+    int64_t storageTile = 0;
+    int localK = k;
+    int localN = n;
+    if (activeNAttr) {
+      storageTile = n / tiledSMEMTileN;
+      localN = n % tiledSMEMTileN;
+    } else if (activeKAttr) {
+      storageTile = k / tiledSMEMTileK;
+      localK = k % tiledSMEMTileK;
+    }
+    LocalizedSMEMDescriptor desc =
+        bLoader.localizedSmemLoad(localK, localN);
+    int64_t tileByteOffset = storageTile * tileBytes;
+    assert(tileByteOffset % 16 == 0 &&
+           "storage tile must use WGMMA descriptor units");
+    if (tileByteOffset != 0)
+      desc.baseb128 =
+          tb.add(desc.baseb128, tb.i64_val(tileByteOffset / 16));
     return {desc.baseb128, desc.descriptorImm};
   };
 
@@ -409,74 +612,78 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   unsigned tileIdx = 0;
   for (int m = 0; m < numRepM; ++m) {
     for (int n = 0; n < numRepN; ++n) {
-      auto accTy = accTypes[tileIdx];
-      Value d = initialAccumulators[tileIdx];
-      Value useC = initialUseC[tileIdx++];
-      uint32_t numLowPrecisionAcc = 0;
-      Value partialAcc;
-      for (int k = 0; k < activeNumRepK; ++k) {
-        Value a;
-        TleWgmmaOperand aOperand;
-        TleWgmmaOperand bOperand;
-        bool isFirstWgmma = m == 0 && n == 0 && k == 0;
-        if (aInShared) {
-          aOperand =
-              isFirstWgmma ? firstA : buildSharedA(m * mmaSizeM, k * mmaSizeK);
-          a = aOperand.value;
-        } else {
-          if (isFirstWgmma) {
-            aOperand = firstA;
+      for (unsigned fragment = 0; fragment < activeNFragments; ++fragment) {
+        auto accTy = accTypes[tileIdx];
+        Value d = initialAccumulators[tileIdx];
+        Value useC = initialUseC[tileIdx++];
+        uint32_t numLowPrecisionAcc = 0;
+        Value partialAcc;
+        for (int k = 0; k < activeNumRepK; ++k) {
+          Value a;
+          TleWgmmaOperand aOperand;
+          TleWgmmaOperand bOperand;
+          bool isFirstWgmma =
+              m == 0 && n == 0 && fragment == 0 && k == 0;
+          if (aInShared) {
+            aOperand = isFirstWgmma
+                           ? firstA
+                           : buildSharedA(m * mmaSizeM, k * mmaSizeK);
             a = aOperand.value;
           } else {
-            auto aDotOpEnc =
-                cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
-            assert(aDotOpEnc.getKWidth() ==
-                   32 / aTensorTy.getElementTypeBitWidth());
+            if (isFirstWgmma) {
+              aOperand = firstA;
+              a = aOperand.value;
+            } else {
+              auto aDotOpEnc =
+                  cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+              assert(aDotOpEnc.getKWidth() ==
+                     32 / aTensorTy.getElementTypeBitWidth());
 
-            unsigned regASize = (instrMNK[0] * instrMNK[2]) / 32;
-            llvm::SmallVector<Value> regA =
-                loadReg(rewriter, loc, structA,
-                        (m * physicalNumRepK + k) * regASize, regASize,
-                        startSequence);
-            auto regATy = LLVM::LLVMStructType::getLiteral(
-                rewriter.getContext(),
-                SmallVector<Type>(regA.size(), regA[0].getType()));
-            a = packLLElements(loc, typeConverter, regA, rewriter, regATy);
-            aOperand = {a, std::nullopt};
+              unsigned regASize = (instrMNK[0] * instrMNK[2]) / 32;
+              llvm::SmallVector<Value> regA =
+                  loadReg(rewriter, loc, structA,
+                          (m * physicalNumRepK + k) * regASize, regASize,
+                          startSequence);
+              auto regATy = LLVM::LLVMStructType::getLiteral(
+                  rewriter.getContext(),
+                  SmallVector<Type>(regA.size(), regA[0].getType()));
+              a = packLLElements(loc, typeConverter, regA, rewriter, regATy);
+              aOperand = {a, std::nullopt};
+            }
+          }
+          int nOffset = n * mmaSizeN + fragment * wgmmaInstructionN;
+          bOperand = isFirstWgmma
+                         ? firstB
+                         : buildSharedB(k * mmaSizeK, nOffset);
+          auto b = bOperand.value;
+          numLowPrecisionAcc += K;
+          // If using native accumulation would cause use to do more low
+          // precision accumulation than allowed, use a separate accumulator.
+          bool requireAddAccumulator =
+              needsPartialAccumulator &&
+              (numLowPrecisionAcc >= maxNumImpreciseAcc ||
+               k == activeNumRepK - 1);
+          Value mmaAcc = needsPartialAccumulator ? partialAcc : d;
+          auto mmaOp = triton::nvgpu::WGMMAOp::create(
+              rewriter, loc, accTy, a, b, useC, mmaAcc, M,
+              wgmmaInstructionN, K, eltTypeC, eltTypeA, eltTypeB, layoutA,
+              layoutB);
+          setDescriptorAttrs(mmaOp, aOperand, bOperand);
+          mmaAcc = mmaOp;
+          useC = tb.i1_val(1);
+          if (needsPartialAccumulator)
+            partialAcc = mmaAcc;
+          else
+            d = mmaAcc;
+          if (requireAddAccumulator) {
+            d = d ? faddAccumulate(rewriter, loc, d, partialAcc) : partialAcc;
+            numLowPrecisionAcc = 0;
+            partialAcc = Value();
           }
         }
-        bOperand =
-            isFirstWgmma ? firstB : buildSharedB(k * mmaSizeK, n * mmaSizeN);
-        auto b = bOperand.value;
-        numLowPrecisionAcc += K;
-        // If using native accumulation would cause use to do more low precion
-        // accumulation than allowed do a separate allocation.
-        bool requireAddAccumulator =
-            needsPartialAccumulator &&
-            (numLowPrecisionAcc >= maxNumImpreciseAcc ||
-             k == activeNumRepK - 1);
-        Value mmaAcc = needsPartialAccumulator ? partialAcc : d;
-        auto mmaOp = triton::nvgpu::WGMMAOp::create(
-            rewriter, loc, accTy, a, b, useC, mmaAcc, M, N, K, eltTypeC,
-            eltTypeA, eltTypeB, layoutA, layoutB);
-        setDescriptorAttrs(mmaOp, aOperand, bOperand);
-        mmaAcc = mmaOp;
-        useC = tb.i1_val(1);
-        if (needsPartialAccumulator)
-          partialAcc = mmaAcc;
-        else
-          d = mmaAcc;
-        // If we need accumulate separately to have higher precision, insert
-        // adds.
-        if (requireAddAccumulator) {
-          d = d ? faddAccumulate(rewriter, loc, d, partialAcc) : partialAcc;
-          numLowPrecisionAcc = 0;
-          partialAcc = Value();
-        }
-      }
-      auto acc = unpackLLElements(loc, d, rewriter);
-      for (int i = 0; i < acc.size(); ++i) {
-        mmaResults.push_back(acc[i]);
+        auto acc = unpackLLElements(loc, d, rewriter);
+        for (int i = 0; i < acc.size(); ++i)
+          mmaResults.push_back(acc[i]);
       }
     }
   }
@@ -491,8 +698,8 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
     // the physical result type by inserting only the valid prefixes into an
     // undef carrier. This neither reads C's dead suffix nor adds it to the
     // asynchronous wait group.
-    assert(dTensorTy.getElementType().isF32() &&
-           "active_n verifier must restrict the accumulator to f32");
+    assert(dTensorTy.getElementTypeBitWidth() == 32 &&
+           "active_n verifier must restrict the accumulator to 32 bits");
     unsigned physicalResultSize =
         numRepM * numRepN * physicalAccSize;
     auto structTy = LLVM::LLVMStructType::getLiteral(
