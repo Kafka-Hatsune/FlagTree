@@ -263,6 +263,22 @@ constexpr llvm::StringLiteral
 static Value getMemDescRoot(Value value) {
   Value current = value;
   while (true) {
+    if (auto result = dyn_cast<OpResult>(current)) {
+      if (auto wait =
+              dyn_cast<triton::nvidia_gpu::WarpGroupDotWaitOp>(
+                  result.getOwner())) {
+        unsigned resultNo = result.getResultNumber();
+        if (resultNo < wait.getNumOperands()) {
+          current = wait.getOperand(resultNo);
+          continue;
+        }
+      }
+    }
+    if (auto view =
+            current.getDefiningOp<ttle::MemDescWGMMAViewOp>()) {
+      current = view.getSrc();
+      continue;
+    }
     if (auto index = current.getDefiningOp<ttg::MemDescIndexOp>()) {
       current = index.getSrc();
       continue;

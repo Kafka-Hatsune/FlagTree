@@ -1760,6 +1760,15 @@ void replaceUsesAndPropagateType(
     } else if (auto trans = dyn_cast<ttg::MemDescTransOp>(user)) {
       newVal = ttg::MemDescTransOp::create(builder, trans.getLoc(), val,
                                            trans.getOrder());
+    } else if (auto reinterpret =
+                   dyn_cast<ttg::MemDescReinterpretOp>(user)) {
+      ttg::MemDescType oldType = reinterpret.getType();
+      bool isMutable = cast<ttg::MemDescType>(val.getType()).getMutableMemory();
+      Type newDstType = ttg::MemDescType::get(
+          oldType.getShape(), oldType.getElementType(), oldType.getEncoding(),
+          oldType.getMemorySpace(), isMutable, oldType.getAllocShape());
+      newVal = ttg::MemDescReinterpretOp::create(
+          builder, reinterpret.getLoc(), newDstType, val);
 #ifdef __TLE__
     } else if (auto view = dyn_cast<triton::tle::MemDescWGMMAViewOp>(user)) {
       ttg::MemDescType oldType = view.getType();

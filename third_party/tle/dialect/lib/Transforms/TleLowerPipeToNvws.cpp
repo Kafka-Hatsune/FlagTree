@@ -252,6 +252,10 @@ static Value getMemDescRoot(Value value) {
       current = canonicalizePipeField(alias.getSrc());
       continue;
     }
+    if (auto reinterpret = current.getDefiningOp<ttg::MemDescReinterpretOp>()) {
+      current = canonicalizePipeField(reinterpret.getSrc());
+      continue;
+    }
     break;
   }
   return current;
