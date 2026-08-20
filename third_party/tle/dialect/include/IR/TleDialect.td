@@ -39,6 +39,7 @@ def Tle_Dialect : Dialect {
     "triton::gpu::TritonGPUDialect",
   ];
   let usePropertiesForAttributes = 1;
+  let hasOperationAttrVerify = 1;
 }
 
 #endif
