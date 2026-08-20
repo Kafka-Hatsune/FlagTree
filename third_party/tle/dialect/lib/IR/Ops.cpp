@@ -29,6 +29,7 @@
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallSet.h"
 #include <cctype>
@@ -559,7 +560,35 @@ static LogicalResult verifyPipeAttrs(Operation *op, OperandRange fields) {
 
   if (fields.empty())
     return op->emitOpError("expects at least one pipe field");
-  for (Value field : fields) {
+
+  llvm::SmallBitVector tiledFields(fields.size());
+  if (auto tiledAttr =
+          op->getAttrOfType<DenseI32ArrayAttr>("tiled_smem_fields")) {
+    for (int32_t fieldIndex : tiledAttr.asArrayRef()) {
+      if (fieldIndex < 0 ||
+          fieldIndex >= static_cast<int32_t>(fields.size()))
+        return op->emitOpError(
+            "tiled_smem_fields index is outside the field operand range");
+      if (tiledFields.test(fieldIndex))
+        return op->emitOpError(
+            "tiled_smem_fields indices must be unique");
+      tiledFields.set(fieldIndex);
+    }
+    if (tiledFields.none())
+      return op->emitOpError(
+          "tiled_smem_fields must not be empty when present");
+  }
+
+  for (auto [fieldIndex, field] : llvm::enumerate(fields)) {
+    if (tiledFields.test(fieldIndex)) {
+      ExactSMEMRoot root = getExactSMEMRoot(field);
+      if (failed(verifyExactSMEMRoot(op, root)))
+        return failure();
+      if (root.capacity != capacity)
+        return op->emitOpError(
+            "expects exact-SMEM field capacity to match pipe capacity");
+      continue;
+    }
     auto type = cast<triton::gpu::MemDescType>(field.getType());
     if (!isa<triton::gpu::SharedMemorySpaceAttr>(type.getMemorySpace()))
       return op->emitOpError("expects only shared-memory pipe fields");
