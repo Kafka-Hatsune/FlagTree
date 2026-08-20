@@ -254,6 +254,60 @@ LogicalResult WGMMAOp::verify() {
     return emitOpError("expects N dimension to be divisible by 8");
   if (aShape[1] < 16)
     return emitOpError("expects K dimension to be at least 16");
+
+  IntegerAttr activeN = getActiveNAttr();
+  IntegerAttr activeK = getActiveKAttr();
+  if (!activeN && !activeK)
+    return success();
+  if (activeN && activeK)
+    return emitOpError("active_n and active_k cannot be specified together");
+  SmallVector<int64_t> cShapePerCTA =
+      cType.getEncoding() ? triton::gpu::getShapePerCTA(cType)
+                          : SmallVector<int64_t>(cShape);
+  if (activeN && activeN.getInt() == cShapePerCTA[1])
+    return success();
+  if (activeK && activeK.getInt() == aShape[1])
+    return success();
+
+  Type aElemType = aType.getElementType();
+  Type bElemType = bType.getElementType();
+  if (!isa<Float16Type, BFloat16Type>(aElemType) ||
+      aElemType != bElemType || !cType.getElementType().isF32())
+    return emitOpError("active extents require matching f16 or bf16 A/B "
+                       "operands and an f32 accumulator");
+  if (aShape[0] != 64)
+    return emitOpError("active extents currently require physical M=64");
+
+  if (activeN) {
+    int64_t activeNValue = activeN.getInt();
+    if (activeNValue <= 0 || activeNValue % 8 != 0)
+      return emitOpError("active_n must be a positive multiple of 8");
+    if (activeNValue > bShape[1])
+      return emitOpError("active_n exceeds the physical N carrier");
+    if (bShape[1] > 256)
+      return emitOpError(
+          "active_n requires a single physical N carrier no greater than 256");
+    if (getOperation()->hasAttr("tle.wgmma_accumulator_chain_c"))
+      return emitOpError(
+          "active_n does not support tle.wgmma_accumulator_chain_c");
+    if (!isa<triton::gpu::MemDescType>(getA().getType()))
+      return emitOpError("active_n requires a shared-memory A operand");
+  }
+
+  if (activeK) {
+    int64_t activeKValue = activeK.getInt();
+    if (activeKValue <= 0 || activeKValue % 16 != 0)
+      return emitOpError("active_k must be a positive multiple of 16");
+    if (activeKValue > aShape[1])
+      return emitOpError("active_k exceeds the physical K carrier");
+    if (aShape[1] % 16 != 0)
+      return emitOpError("active_k requires physical K divisible by 16");
+    int64_t physicalSplits = aShape[1] / 16;
+    if ((physicalSplits & (physicalSplits - 1)) != 0)
+      return emitOpError(
+          "active_k physical carrier must contain a power-of-two number of "
+          "K16 instructions");
+  }
   return success();
 }
 

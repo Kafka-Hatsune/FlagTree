@@ -45,6 +45,7 @@
 #endif // __FLAGTREE_RLC_ENHANCE__
 #include "triton/Analysis/Utility.h"
 #ifdef __TLE__
+#include "tle/dialect/include/IR/Dialect.h"
 #include "tle/dialect/include/Transforms/TransformAttrs.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #endif // __TLE__
@@ -437,6 +438,13 @@ static int64_t getByteCount(Value result, int64_t minElementCount,
 // Return true if the op is an op with a layout we don't want to change. We will
 // propagate the layout starting from anchor ops.
 bool isLayoutAnchor(Operation *op) {
+#ifdef __TLE__
+  // TLE WGMMA is lowered to the native WarpGroupDot anchor later in the
+  // NVIDIA pipeline.  Treat it identically before that lowering so layout
+  // propagation never attempts to clone or retag the asynchronous dot.
+  if (isa<tle::WGMMAOp>(op))
+    return true;
+#endif // __TLE__
   if (isa<DescriptorOpInterface>(op))
     return true;
   if (isa<LoadOp, StoreOp>(op))
