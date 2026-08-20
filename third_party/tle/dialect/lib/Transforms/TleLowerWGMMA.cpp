@@ -45,6 +45,10 @@ namespace ttng = mlir::triton::nvidia_gpu;
 namespace {
 
 static constexpr unsigned kScfForControlOperands = 3;
+static constexpr llvm::StringLiteral
+    kTleWgmmaActiveNAttr("tle.wgmma_active_n");
+static constexpr llvm::StringLiteral
+    kTleWgmmaActiveKAttr("tle.wgmma_active_k");
 
 static std::optional<unsigned> getForInitArgIndex(OpOperand &use) {
   auto forOp = dyn_cast<scf::ForOp>(use.getOwner());
@@ -128,6 +132,19 @@ static bool isMMAEncoded(Value value) {
     return false;
   Attribute encoding = type.getEncoding();
   return encoding && isa<ttg::NvidiaMmaEncodingAttr>(encoding);
+}
+
+static bool isFullActiveN(WGMMAOp op, IntegerAttr activeN) {
+  auto accType = cast<RankedTensorType>(op.getC().getType());
+  SmallVector<int64_t> shapePerCTA =
+      accType.getEncoding() ? ttg::getShapePerCTA(accType)
+                            : SmallVector<int64_t>(accType.getShape());
+  return activeN.getInt() == shapePerCTA[1];
+}
+
+static bool isFullActiveK(WGMMAOp op, IntegerAttr activeK) {
+  auto aType = cast<ttg::TensorOrMemDesc>(op.getA().getType());
+  return activeK.getInt() == aType.getShape()[1];
 }
 
 static Value lookupEncodedAccumulator(Value value,
@@ -230,14 +247,20 @@ struct TritonTleLowerWGMMAPass
             failed = true;
             return;
           }
-          auto nativeDot = ttng::WarpGroupDotOp::create(
+          IntegerAttr activeN = wgmma.getActiveNAttr();
+          IntegerAttr activeK = wgmma.getActiveKAttr();
+          auto dot = ttng::WarpGroupDotOp::create(
               builder, wgmma.getLoc(), acc.getType(), a, wgmma.getB(), acc,
-              Value(), wgmma.getInputPrecision(), wgmma.getMaxNumImpreciseAcc(),
-              wgmma.getIsAsync());
-          encodedAccs[wgmma.getD()] = nativeDot.getD();
+              Value(), wgmma.getInputPrecision(),
+              wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
+          if (activeN && !isFullActiveN(wgmma, activeN))
+            dot->setAttr(kTleWgmmaActiveNAttr, activeN);
+          if (activeK && !isFullActiveK(wgmma, activeK))
+            dot->setAttr(kTleWgmmaActiveKAttr, activeK);
+          encodedAccs[wgmma.getD()] = dot.getD();
           for (OpOperand &use :
                llvm::make_early_inc_range(wgmma.getD().getUses()))
-            convertLoopCarriedAccumulator(use, nativeDot.getD(), encodedAccs);
+            convertLoopCarriedAccumulator(use, dot.getD(), encodedAccs);
           continue;
         }
 
