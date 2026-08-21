@@ -119,7 +119,8 @@ def pipe(
     if not fields:
         raise ValueError("tle.pipe requires at least one payload field")
 
-    if mthreads_common.enabled() and mthreads_pipe.is_backend_builder(_semantic.builder):
+    mthreads_backend = mthreads_common.enabled() and mthreads_pipe.is_backend_builder(_semantic.builder)
+    if mthreads_backend:
         mthreads_pipe.validate_pipe_options(scope, reader_names, one_shot, fields)
 
     for field_name, field in fields.items():
@@ -134,9 +135,16 @@ def pipe(
         if field.shape[0] != capacity:
             raise ValueError(
                 f"tle.pipe field {field_name!r} leading dimension must equal capacity {capacity}, got {field.shape[0]}")
-
-    _semantic.builder.create_pipe_create([field.handle for field in fields.values()], capacity, scope, name or "",
-                                         list(fields.keys()), list(reader_names or ()), one_shot)
+    create_args = (
+        [field.handle for field in fields.values()],
+        capacity,
+        scope,
+        name or "",
+        list(fields.keys()),
+        list(reader_names or ()),
+        one_shot,
+    )
+    _semantic.builder.create_pipe_create(*create_args)
     return gpu_types.pipe_value(capacity, scope, name, fields, reader_names, one_shot=one_shot)
 
 

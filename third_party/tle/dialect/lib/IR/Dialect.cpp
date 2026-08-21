@@ -96,6 +96,14 @@ LogicalResult TleDialect::verifyOperationAttribute(Operation *op,
              << " is valid only on ttg.memdesc_index";
     return verifyExactSMEMTile(op, getExactSMEMTile(view.getResult()));
   }
+  if (name == kExactSMEMTileSpanAttr) {
+    auto view = dyn_cast<gpu::MemDescIndexOp>(op);
+    if (!view || !op->hasAttr(kExactSMEMTileAttr))
+      return op->emitOpError(kExactSMEMTileSpanAttr)
+             << " requires " << kExactSMEMTileAttr
+             << " on ttg.memdesc_index";
+    return verifyExactSMEMTile(op, getExactSMEMTile(view.getResult()));
+  }
   return success();
 }
 } // namespace mlir::triton::tle

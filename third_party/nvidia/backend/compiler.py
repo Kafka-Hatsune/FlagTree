@@ -285,6 +285,9 @@ class CUDABackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
+        # Plan padded non-power-of-two TLE allocs only after the complete TTIR
+        # def-use graph is visible, and before TTGPU layout selection.
+        tle.passes.add_plan_logical_domains(pm)
         pm.run(mod, 'make_ttir')
         return mod
 
@@ -338,6 +341,8 @@ class CUDABackend(BaseBackend):
         # end flagtree tle
         passes.ttgpuir.add_accelerate_matmul(pm)
         tle.passes.add_lower_wgmma(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
         # flagtree pass: merge segmented dot chains whose operands are proven
         # ordered slices of one wider operand. Runs after accelerate-matmul so
         # the mma layout is known, and before remove-layout-conversions so the
