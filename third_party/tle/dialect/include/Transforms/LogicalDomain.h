@@ -1,0 +1,125 @@
+/*
+ * Copyright 2025- FlagOS Contributors
+ * SPDX-License-Identifier: MIT
+ */
+
+#ifndef TRITON_TLE_TRANSFORMS_LOGICAL_DOMAIN_H_
+#define TRITON_TLE_TRANSFORMS_LOGICAL_DOMAIN_H_
+
+#include "mlir/IR/BuiltinOps.h"
+#include "tle/dialect/include/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include <cstdint>
+#include <optional>
+
+namespace mlir::triton::tle {
+
+using LogicalShape = SmallVector<int64_t>;
+
+struct LogicalDomainProvenance {
+  SmallVector<Operation *, 2> roots;
+  SmallVector<Operation *, 2> seeds;
+
+  LogicalDomainProvenance() = default;
+  LogicalDomainProvenance(Operation *root, Operation *seed) {
+    if (root)
+      roots.push_back(root);
+    if (seed)
+      seeds.push_back(seed);
+  }
+
+  Operation *primaryRoot() const {
+    return roots.empty() ? nullptr : roots.front();
+  }
+};
+
+struct MemDescLogicalState {
+  LogicalShape physicalShape;
+  LogicalShape logicalShape;
+  SmallVector<int32_t> axisMap;
+  LogicalDomainProvenance provenance;
+  bool isStage = false;
+  bool transposed = false;
+};
+
+/// A tensor carries at most one invalid physical tail.  The physical shape is
+/// read from the tensor type; this fact stores only the restricted axis and
+/// its valid prefix extent.
+struct TensorFragmentState {
+  int32_t axis = 0;
+  int64_t logicalExtent = 0;
+  LogicalDomainProvenance provenance;
+};
+
+enum class LogicalReductionIdentity : uint8_t {
+  NegativeInfinity,
+  PositiveInfinity,
+  Zero,
+  One,
+  True,
+  False,
+};
+
+struct LogicalMemDescUseAction {
+  OpOperand *use = nullptr;
+  bool markTiledPipeField = false;
+};
+
+struct LogicalRootRewriteAction {
+  gpu::LocalAllocOp alloc;
+  LogicalShape logicalShape;
+  SmallVector<int64_t, 2> storageTileShape;
+  SmallVector<gpu::MemDescIndexOp> stages;
+  SmallVector<gpu::TMACopyOp> copies;
+  SmallVector<LogicalMemDescUseAction> memdescUses;
+  bool reachesWGMMA = false;
+};
+
+struct LogicalWGMMAAction {
+  WGMMAOp op;
+  std::optional<int64_t> activeN;
+};
+
+enum class LogicalFragmentFoldMechanism : uint8_t {
+  IdentityMask,
+  WGMMAActiveK,
+};
+
+struct LogicalFragmentFoldAction {
+  Operation *op = nullptr;
+  unsigned operandIndex = 0;
+  int32_t axis = 0;
+  int64_t logicalExtent = 0;
+  LogicalFragmentFoldMechanism mechanism =
+      LogicalFragmentFoldMechanism::IdentityMask;
+  LogicalReductionIdentity identity = LogicalReductionIdentity::Zero;
+};
+
+struct LogicalFragmentGuardAction {
+  Operation *op = nullptr;
+  unsigned valueOperand = 0;
+  std::optional<unsigned> maskOperand;
+  int32_t axis = 0;
+  int64_t logicalExtent = 0;
+};
+
+/// An analysis product that owns every fact required by the infallible apply
+/// phase.  It deliberately stores no temporary IR created during analysis.
+struct LogicalDomainPlan {
+  ModuleOp module;
+  SmallVector<LogicalRootRewriteAction, 2> roots;
+  SmallVector<LogicalWGMMAAction, 4> wgmmas;
+  SmallVector<LogicalFragmentFoldAction, 4> folds;
+  SmallVector<LogicalFragmentGuardAction, 4> guards;
+  DenseMap<Value, MemDescLogicalState> memdescs;
+  DenseMap<Value, TensorFragmentState> tensors;
+};
+
+FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module);
+void applyLogicalDomainPlan(LogicalDomainPlan &&plan);
+
+} // namespace mlir::triton::tle
+
+#endif // TRITON_TLE_TRANSFORMS_LOGICAL_DOMAIN_H_

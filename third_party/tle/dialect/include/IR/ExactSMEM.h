@@ -23,9 +23,12 @@ inline constexpr llvm::StringLiteral
     kExactSMEMStageAttr("tle.exact_smem_stage");
 inline constexpr llvm::StringLiteral
     kExactSMEMTileAttr("tle.exact_smem_tile");
+inline constexpr llvm::StringLiteral
+    kExactSMEMTileSpanAttr("tle.exact_smem_tile_span");
+inline constexpr llvm::StringLiteral
+    kLogicalTMACopyBytesAttr("tle.logical_tma_copy_bytes");
 
-inline constexpr int64_t kExactSMEMRowQuantum = 16;
-inline constexpr int64_t kExactSMEMColQuantum = 64;
+inline constexpr int64_t kExactSMEMFragmentQuantum = 16;
 
 /// Element types accepted by the Hopper exact-SMEM/WGMMA path.  Keep this in
 /// sync with Triton's WGMMA operand lowering rather than treating exact SMEM
@@ -103,15 +106,26 @@ struct ExactSMEMRoot {
   int64_t capacity = 0;
   int64_t rows = 0;
   int64_t cols = 0;
-  int64_t atomRows = 0;
-  int64_t atomCols = 0;
+  int64_t storageTileRows = 0;
+  int64_t storageTileCols = 0;
 
   explicit operator bool() const { return static_cast<bool>(alloc); }
-  int64_t getAtomRows() const { return atomRows; }
-  int64_t getAtomCols() const { return atomCols; }
-  int64_t getRowTiles() const { return rows / atomRows; }
-  int64_t getColTiles() const { return cols / atomCols; }
-  int64_t getTilesPerStage() const { return getRowTiles() * getColTiles(); }
+  int64_t getStorageTileRows() const { return storageTileRows; }
+  int64_t getStorageTileCols() const { return storageTileCols; }
+  std::optional<unsigned> getFragmentAxis() const {
+    bool fragmentedRows = storageTileRows != rows;
+    bool fragmentedCols = storageTileCols != cols;
+    if (fragmentedRows == fragmentedCols)
+      return std::nullopt;
+    return fragmentedRows ? 0u : 1u;
+  }
+  int64_t getTilesPerStage() const {
+    std::optional<unsigned> fragmentAxis = getFragmentAxis();
+    if (!fragmentAxis)
+      return 0;
+    return *fragmentAxis == 0 ? rows / storageTileRows
+                              : cols / storageTileCols;
+  }
 };
 
 struct ExactSMEMStage {
@@ -129,8 +143,8 @@ struct ExactSMEMStage {
   int64_t getCapacity() const { return root.capacity; }
   int64_t getRows() const { return root.rows; }
   int64_t getCols() const { return root.cols; }
-  int64_t getAtomRows() const { return root.getAtomRows(); }
-  int64_t getAtomCols() const { return root.getAtomCols(); }
+  int64_t getStorageTileRows() const { return root.getStorageTileRows(); }
+  int64_t getStorageTileCols() const { return root.getStorageTileCols(); }
   int64_t getLogicalK() const { return transposed ? root.cols : root.rows; }
   int64_t getLogicalN() const { return transposed ? root.rows : root.cols; }
   int64_t getCarrierK() const {
@@ -149,17 +163,19 @@ struct ExactSMEMTile {
   Value stage;
   std::optional<int64_t> staticStage;
   int64_t tile = 0;
+  int64_t span = 1;
 
   explicit operator bool() const { return static_cast<bool>(view); }
   Value getSrc() { return root.alloc.getResult(); }
   Value getStage() const { return stage; }
   std::optional<int64_t> getStaticStage() const { return staticStage; }
   int64_t getTile() const { return tile; }
+  int64_t getSpan() const { return span; }
   int64_t getCapacity() const { return root.capacity; }
   int64_t getRows() const { return root.rows; }
   int64_t getCols() const { return root.cols; }
-  int64_t getAtomRows() const { return root.getAtomRows(); }
-  int64_t getAtomCols() const { return root.getAtomCols(); }
+  int64_t getStorageTileRows() const { return root.getStorageTileRows(); }
+  int64_t getStorageTileCols() const { return root.getStorageTileCols(); }
   ttg::MemDescType getType() { return view.getType(); }
   Operation *getOperation() { return view.getOperation(); }
 };
@@ -172,7 +188,25 @@ inline std::optional<int64_t> getExactSMEMConstant(Value value) {
   return std::nullopt;
 }
 
+inline Value resolveExactSMEMRootSource(Value value) {
+  while (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto partitions = dyn_cast_or_null<ttg::WarpSpecializePartitionsOp>(
+        argument.getOwner()->getParentOp());
+    if (!partitions)
+      break;
+    auto warpSpecialize =
+        dyn_cast_or_null<ttg::WarpSpecializeOp>(partitions->getParentOp());
+    if (!warpSpecialize ||
+        argument.getArgNumber() >=
+            warpSpecialize.getExplicitCaptures().size())
+      return {};
+    value = warpSpecialize.getExplicitCaptures()[argument.getArgNumber()];
+  }
+  return value;
+}
+
 inline ExactSMEMRoot getExactSMEMRoot(Value value) {
+  value = resolveExactSMEMRootSource(value);
   auto alloc = value.getDefiningOp<ttg::LocalAllocOp>();
   if (!alloc)
     return {};
@@ -269,11 +303,15 @@ inline ExactSMEMTile getExactSMEMTile(Value value) {
   if (!root)
     return {};
   int64_t tile = tileAttr.getInt();
+  int64_t span = 1;
+  if (auto spanAttr =
+          view->getAttrOfType<IntegerAttr>(kExactSMEMTileSpanAttr))
+    span = spanAttr.getInt();
   std::optional<ExactSMEMStageIndex> stage = matchExactSMEMStage(
       view.getIndex(), root.getTilesPerStage(), tile);
   if (!stage)
     return {};
-  return {view, root, stage->value, stage->constant, tile};
+  return {view, root, stage->value, stage->constant, tile, span};
 }
 
 inline LogicalResult verifyExactSMEMRoot(Operation *anchor,
@@ -283,27 +321,41 @@ inline LogicalResult verifyExactSMEMRoot(Operation *anchor,
   if (root.capacity <= 0 ||
       root.capacity > std::numeric_limits<int32_t>::max())
     return anchor->emitOpError("expects positive i32 exact-SMEM capacity");
-  if (root.rows <= 0 || root.rows > 128 ||
-      root.rows % kExactSMEMRowQuantum != 0)
+  if (root.rows <= 0 || root.cols <= 0)
+    return anchor->emitOpError("expects positive exact-SMEM payload extents");
+  bool fragmentedRows = !llvm::isPowerOf2_64(root.rows);
+  bool fragmentedCols = !llvm::isPowerOf2_64(root.cols);
+  if (fragmentedRows == fragmentedCols)
     return anchor->emitOpError(
-        "expects exact-SMEM rows to be a multiple of 16 no greater than 128");
-  if (root.cols <= 0 || root.cols > 256 ||
-      root.cols % kExactSMEMColQuantum != 0)
+        "expects exactly one non-power-of-two exact-SMEM payload axis");
+  int64_t fragmentExtent = fragmentedRows ? root.rows : root.cols;
+  if (fragmentExtent % kExactSMEMFragmentQuantum != 0)
     return anchor->emitOpError(
-        "expects exact-SMEM cols to be a multiple of 64 no greater than 256");
-  if (root.atomRows < kExactSMEMRowQuantum || root.atomRows > root.rows ||
-      !llvm::isPowerOf2_64(root.atomRows) ||
-      root.rows % root.atomRows != 0 ||
-      root.atomCols < kExactSMEMColQuantum || root.atomCols > root.cols ||
-      !llvm::isPowerOf2_64(root.atomCols) ||
-      root.cols % root.atomCols != 0)
+        "expects the exact-SMEM fragment extent to be a multiple of 16");
+
+  std::optional<unsigned> storageFragmentAxis = root.getFragmentAxis();
+  if (!storageFragmentAxis ||
+      *storageFragmentAxis != static_cast<unsigned>(fragmentedCols))
     return anchor->emitOpError(
-        "expects a power-of-two exact-SMEM atom that divides the logical "
-        "stage and is at least 16x64");
+        "expects storage tiles to split only the non-power-of-two axis");
+  int64_t fragmentTileExtent = fragmentedRows ? root.storageTileRows
+                                              : root.storageTileCols;
+  int64_t fullTileExtent = fragmentedRows ? root.storageTileCols
+                                          : root.storageTileRows;
+  int64_t fullExtent = fragmentedRows ? root.cols : root.rows;
+  if (fragmentTileExtent < kExactSMEMFragmentQuantum ||
+      !llvm::isPowerOf2_64(fragmentTileExtent) ||
+      fragmentTileExtent >= fragmentExtent ||
+      fragmentExtent % fragmentTileExtent != 0 ||
+      fullTileExtent != fullExtent || !llvm::isPowerOf2_64(fullTileExtent))
+    return anchor->emitOpError(
+        "expects each exact-SMEM storage tile to retain the full power-of-two "
+        "axis and use a power-of-two fragment-axis divisor of at least 16");
 
   auto type = root.alloc.getType();
   SmallVector<int64_t> expected{root.capacity * root.getTilesPerStage(),
-                                root.atomRows, root.atomCols};
+                                root.storageTileRows,
+                                root.storageTileCols};
   if (type.getShape() != ArrayRef<int64_t>(expected) ||
       type.getAllocShape() != ArrayRef<int64_t>(expected))
     return anchor->emitOpError("expects exact-SMEM root shape ") << expected;
@@ -333,12 +385,14 @@ inline LogicalResult verifyExactSMEMStage(Operation *anchor,
     if (*stage.staticStage < 0 || *stage.staticStage >= stage.root.capacity)
       return anchor->emitOpError("static exact-SMEM stage exceeds capacity");
 
-  auto atomType = stage.atom.getType();
-  SmallVector<int64_t> atomShape{stage.getAtomRows(), stage.getAtomCols()};
-  if (atomType.getShape() != ArrayRef<int64_t>(atomShape) ||
-      atomType.getAllocShape() != ArrayRef<int64_t>(atomShape))
+  auto storageTileType = stage.atom.getType();
+  SmallVector<int64_t> storageTileShape{stage.getStorageTileRows(),
+                                        stage.getStorageTileCols()};
+  if (storageTileType.getShape() != ArrayRef<int64_t>(storageTileShape) ||
+      storageTileType.getAllocShape() !=
+          ArrayRef<int64_t>(storageTileShape))
     return anchor->emitOpError(
-        "expects exact-SMEM stage base to be one selected atom");
+        "expects exact-SMEM stage base to be one selected storage tile");
   auto type = stage.getType();
   SmallVector<int64_t> expected{
       static_cast<int64_t>(llvm::PowerOf2Ceil(stage.root.rows)),
@@ -346,8 +400,8 @@ inline LogicalResult verifyExactSMEMStage(Operation *anchor,
   if (type.getShape() != ArrayRef<int64_t>(expected) ||
       type.getAllocShape() != ArrayRef<int64_t>(expected))
     return anchor->emitOpError("expects exact-SMEM carrier shape ") << expected;
-  if (type.getElementType() != atomType.getElementType() ||
-      type.getMemorySpace() != atomType.getMemorySpace() ||
+  if (type.getElementType() != storageTileType.getElementType() ||
+      type.getMemorySpace() != storageTileType.getMemorySpace() ||
       !type.getMutableMemory())
     return anchor->emitOpError(
         "expects exact-SMEM carrier to preserve mutable storage type");
@@ -374,12 +428,16 @@ inline LogicalResult verifyExactSMEMTile(Operation *anchor,
           "static exact-SMEM tile stage exceeds capacity");
   if (tile.tile < 0 || tile.tile >= tile.root.getTilesPerStage())
     return anchor->emitOpError("exact-SMEM tile index exceeds stage");
-  auto type = tile.getType();
-  SmallVector<int64_t> atomShape{tile.getAtomRows(), tile.getAtomCols()};
-  if (type.getShape() != ArrayRef<int64_t>(atomShape) ||
-      type.getAllocShape() != ArrayRef<int64_t>(atomShape))
+  if (tile.span <= 0 || tile.tile + tile.span > tile.root.getTilesPerStage())
     return anchor->emitOpError(
-        "expects exact-SMEM tile to match the selected atom shape");
+        "exact-SMEM tile span exceeds its logical stage");
+  auto type = tile.getType();
+  SmallVector<int64_t> storageTileShape{tile.getStorageTileRows(),
+                                        tile.getStorageTileCols()};
+  if (type.getShape() != ArrayRef<int64_t>(storageTileShape) ||
+      type.getAllocShape() != ArrayRef<int64_t>(storageTileShape))
+    return anchor->emitOpError(
+        "expects exact-SMEM tile to match the selected storage tile shape");
   auto nvmma = dyn_cast<ttg::NVMMASharedEncodingAttr>(type.getEncoding());
   unsigned elementBitWidth = type.getElementType().getIntOrFloatBitWidth();
   if (!nvmma || nvmma.getElementBitWidth() != elementBitWidth)

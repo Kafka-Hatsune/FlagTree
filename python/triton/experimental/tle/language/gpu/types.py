@@ -338,15 +338,37 @@ class buffered_tensor(tl.base_value):
         handle: The backing IR value representing the buffer allocation.
     """
 
-    def __init__(self, handle, element_ty: tl.dtype, shape: List, storage: scope,
-                 layout: Optional[shared_layout] = None, semantic: TritonSemantic = None, alloc_shape: List = None):
+    def __init__(
+        self,
+        handle,
+        element_ty: tl.dtype,
+        shape: List,
+        storage: scope,
+        layout: Optional[shared_layout] = None,
+        semantic: TritonSemantic = None,
+        alloc_shape: List = None,
+        *,
+        storage_shape: List = None,
+        logical_candidate: bool = False,
+        logical_non_power_axis: int = None,
+    ):
         """Not called by user code."""
         super().__init__()
         # IR handle
         self.handle = handle
         # Block shape
         self.shape = shape
-        self.type = buffered_tensor_type(element_ty, shape, storage, layout, semantic, alloc_shape=alloc_shape)
+        self.type = buffered_tensor_type(
+            element_ty,
+            shape,
+            storage,
+            layout,
+            semantic,
+            alloc_shape=alloc_shape,
+            storage_shape=storage_shape,
+            logical_candidate=logical_candidate,
+            logical_non_power_axis=logical_non_power_axis,
+        )
         # Following the practice in pytorch, dtype is scalar type
         self.dtype = element_ty
 
@@ -359,7 +381,6 @@ class buffered_tensor(tl.base_value):
             raise ValueError("buffered_tensor.slot requires a rank >= 2 buffer")
         if self.type.storage is not smem:
             raise ValueError(f"buffered_tensor.slot currently supports only smem storage, got {self.type.storage}")
-
         stage_tensor = _semantic.to_tensor(stage)
         stage_ty = stage_tensor.type
         if getattr(stage_ty, "is_block", lambda: False)():
@@ -369,18 +390,48 @@ class buffered_tensor(tl.base_value):
         if stage_ty != tl.int32:
             raise ValueError(f"buffered_tensor.slot stage must be int32, got {stage_ty}")
 
-        slot_shape = list(self.shape[1:])
+        slot_shape = list(self.type.storage_shape[1:])
+        logical_slot_shape = list(self.shape[1:])
         slot_layout = _make_slot_layout(self.type.layout, slot_shape)
-        slot_ty = buffered_tensor_type(self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
-                                       alloc_shape=slot_shape)
+        slot_ty = buffered_tensor_type(
+            self.dtype,
+            logical_slot_shape if self.type.is_logical_candidate else slot_shape,
+            self.type.storage,
+            slot_layout,
+            _semantic,
+            alloc_shape=slot_shape,
+            storage_shape=slot_shape,
+            logical_candidate=self.type.is_logical_candidate,
+            logical_non_power_axis=(
+                self.type.logical_non_power_axis - 1
+                if self.type.is_logical_candidate
+                else None
+            ),
+        )
         slot_handle = _semantic.builder.create_memdesc_index(slot_ty.to_ir(_semantic.builder), self.handle,
                                                              stage_tensor.handle)
-        return buffered_tensor(slot_handle, self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
-                               alloc_shape=slot_ty.alloc_shape)
+        value_cls = logical_smem_stage if self.type.is_logical_candidate else buffered_tensor
+        return value_cls(
+            slot_handle,
+            self.dtype,
+            logical_slot_shape if self.type.is_logical_candidate else slot_shape,
+            self.type.storage,
+            slot_layout,
+            _semantic,
+            alloc_shape=slot_ty.alloc_shape,
+            storage_shape=slot_ty.storage_shape,
+            logical_candidate=self.type.is_logical_candidate,
+            logical_non_power_axis=slot_ty.logical_non_power_axis,
+        )
 
     @tl.builtin
     def reshape(self, shape, _semantic=None):
         """Return an aliasing shared-memory view with a different static shape."""
+        if self.type.is_logical_candidate:
+            raise ValueError(
+                "candidate SMEM root cannot use generic reshape; "
+                "select a stage with slot()"
+            )
         shape = [int(tl._unwrap_if_constexpr(dim)) for dim in tl._unwrap_if_constexpr(shape)]
         if not shape or any(dim <= 0 for dim in shape):
             raise ValueError(f"buffered_tensor.reshape dimensions must be positive, got {shape}")
@@ -400,33 +451,77 @@ class buffered_tensor(tl.base_value):
 
     def make_permute(self, handle, dims):
         permuted_layout = self.type.layout.make_permute(dims)
+        permuted_shape = [self.shape[d] for d in dims]
         return buffered_tensor(
             handle,
             self.dtype,
-            [self.shape[d] for d in dims],
-            self.type.num,
+            permuted_shape,
             self.type.storage,
             permuted_layout,
+            self.type.semantic,
+            alloc_shape=permuted_shape,
         )
 
 
-class buffered_tensor_type(tl.block_type):
+class buffered_tensor_type(tl.base_type):
 
-    def __init__(self, element_ty: tl.dtype, shape: List, storage: scope, layout: Optional[shared_layout] = None,
-                 semantic: TritonSemantic = None, alloc_shape: List = None):
-        super().__init__(element_ty, shape)
+    def __init__(
+        self,
+        element_ty: tl.dtype,
+        shape: List,
+        storage: scope,
+        layout: Optional[shared_layout] = None,
+        semantic: TritonSemantic = None,
+        alloc_shape: List = None,
+        *,
+        storage_shape: List = None,
+        logical_candidate: bool = False,
+        logical_non_power_axis: int = None,
+    ):
+        if not isinstance(shape, (list, tuple)) or not shape or any(not isinstance(dim, int) or dim <= 0 for dim in shape):
+            raise TypeError(f"buffered_tensor shape must contain positive integers, got {shape}")
+        self.element_ty = element_ty
+        self.shape = tuple(shape)
+        self.numel = math.prod(self.shape)
         # Storage
         self.storage = storage
         # layout encoding
         self.layout = layout
-        self.alloc_shape = list(shape if alloc_shape is None else alloc_shape)
+        self.storage_shape = list(shape if storage_shape is None else storage_shape)
+        self.alloc_shape = list(self.storage_shape if alloc_shape is None else alloc_shape)
+        self.logical_candidate = logical_candidate
+        self.logical_non_power_axis = logical_non_power_axis
+        if not self.logical_candidate and math.prod(self.storage_shape) != self.numel:
+            raise ValueError(
+                f"buffered_tensor logical/storage element mismatch: {list(self.shape)} -> {self.storage_shape}")
+        if self.logical_candidate:
+            if logical_non_power_axis is None or not 0 <= logical_non_power_axis < len(self.shape):
+                raise ValueError("logical candidate requires a valid non-power axis")
+            if len(self.storage_shape) != len(self.shape):
+                raise ValueError("logical candidate storage rank must match logical rank")
+            for axis, (logical, storage_dim) in enumerate(zip(self.shape, self.storage_shape)):
+                if axis == logical_non_power_axis:
+                    if storage_dim < logical or storage_dim & (storage_dim - 1):
+                        raise ValueError("logical candidate carrier must round its non-power axis up to a power of two")
+                elif storage_dim != logical:
+                    raise ValueError("logical candidate may pad only its non-power axis")
         # Buffer number. 0 means a single buffer, 1+ means a buffer array.
         assert semantic, "buffered_tensor array must be created with a builder"
         self.semantic = semantic
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[buffered_tensor, int]:
-        value = buffered_tensor(handles[cursor], self.scalar, self.shape, self.storage, self.layout, self.semantic,
-                                alloc_shape=self.alloc_shape)
+        value = buffered_tensor(
+            handles[cursor],
+            self.scalar,
+            list(self.shape),
+            self.storage,
+            self.layout,
+            self.semantic,
+            alloc_shape=self.alloc_shape,
+            storage_shape=self.storage_shape,
+            logical_candidate=self.logical_candidate,
+            logical_non_power_axis=self.logical_non_power_axis,
+        )
         if hasattr(self, "_tle_remote_shard_id"):
             shard_id = getattr(self, "_tle_remote_shard_id")
             scope = getattr(self, "_tle_remote_scope", None)
@@ -439,10 +534,14 @@ class buffered_tensor_type(tl.block_type):
     def mangle(self) -> str:
         elt = self.scalar.mangle()
         shape = '_'.join(map(str, self.shape))
-        alloc_suffix = ""
-        if self.alloc_shape != self.shape:
+        storage_suffix = ""
+        if tuple(self.storage_shape) != self.shape:
+            storage_shape = '_'.join(map(str, self.storage_shape))
+            if self.logical_candidate:
+                storage_suffix = f"C{storage_shape}X{self.logical_non_power_axis}"
+        elif self.alloc_shape != list(self.shape):
             alloc_shape = '_'.join(map(str, self.alloc_shape))
-            alloc_suffix = f"A{alloc_shape}"
+            storage_suffix = f"A{alloc_shape}"
         remote_suffix = ""
         shard_id = getattr(self, "_tle_remote_shard_id", None)
         if shard_id is not None:
@@ -450,14 +549,18 @@ class buffered_tensor_type(tl.block_type):
                 remote_suffix = f"_R{shard_id}"
             else:
                 remote_suffix = "_Rdyn"
-        return f'buffered_{elt}S{shape}{alloc_suffix}{remote_suffix}'
+        return f'buffered_{elt}S{shape}{storage_suffix}{remote_suffix}'
 
     def __str__(self) -> str:
-        return f"buffered_tensor_<{self.element_ty}, {self.shape}, {self.layout}, {self.alloc_shape}, >"
+        return (f"buffered_tensor_<{self.element_ty}, logical={self.shape}, storage={self.storage_shape}, "
+                f"layout={self.layout}, alloc={self.alloc_shape}>")
 
     def __eq__(self, other) -> bool:
-        if not (type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
-                and self.alloc_shape == other.alloc_shape):
+        if not (type(self) is type(other) and self.element_ty == other.element_ty
+                and self.shape == other.shape and self.storage == other.storage and self.layout == other.layout
+                and self.storage_shape == other.storage_shape and self.alloc_shape == other.alloc_shape
+                and self.logical_candidate == other.logical_candidate
+                and self.logical_non_power_axis == other.logical_non_power_axis):
             return False
         self_shard = getattr(self, "_tle_remote_shard_id", None)
         other_shard = getattr(other, "_tle_remote_shard_id", None)
@@ -486,19 +589,158 @@ class buffered_tensor_type(tl.block_type):
     def _flatten_ir_types(self, builder: ir.builder, out: List[ir.type]) -> None:
         out.append(self.to_ir(builder))
 
-    def to_ir(self, builder: ir.builder) -> None:
-        shape = self.shape
+    def to_ir(self, builder: ir.builder):
         builder = self.semantic.builder
         return builder.get_memdesc_type(
-            shape,
+            self.storage_shape,
             self.element_ty.to_ir(builder),
             self.layout.to_ir(builder),
             _storage_to_memdesc_space(self.storage),
             self.alloc_shape,
         )
 
-    def _flatten_ir(self, handles) -> None:
-        handles.append(self.handle)
+    def is_block(self):
+        return True
+
+    def get_block_shapes(self) -> Tuple[int, ...]:
+        return self.shape
+
+    @property
+    def scalar(self):
+        return self.element_ty
+
+    @property
+    def nbytes(self):
+        return self.numel * (self.element_ty.primitive_bitwidth // 8)
+
+    @property
+    def is_logical_candidate(self):
+        return self.logical_candidate
+
+
+class logical_smem_stage(buffered_tensor):
+    """Padded stage placeholder whose exact storage is planned in TTIR."""
+
+    def __init__(
+        self,
+        handle,
+        element_ty,
+        logical_shape,
+        storage,
+        layout,
+        semantic,
+        *,
+        alloc_shape,
+        storage_shape,
+        logical_non_power_axis,
+        **_candidate_metadata,
+    ):
+        tl.base_value.__init__(self)
+        self.handle = handle
+        self.shape = list(storage_shape)
+        self.logical_shape = list(logical_shape)
+        self.dtype = element_ty
+        self.type = logical_smem_stage_type(
+            element_ty,
+            logical_shape,
+            storage,
+            layout,
+            semantic,
+            alloc_shape=alloc_shape,
+            storage_shape=storage_shape,
+            logical_non_power_axis=logical_non_power_axis,
+        )
+
+    @tl.builtin
+    def slot(self, stage, _semantic=None):
+        raise ValueError("logical SMEM stage is already a pipe slot")
+
+    @tl.builtin
+    def reshape(self, shape, _semantic=None):
+        raise ValueError("logical SMEM stage cannot use generic reshape")
+
+
+class logical_smem_stage_type(buffered_tensor_type):
+    """Frontend type that preserves logical-stage metadata across JIT calls."""
+
+    def __init__(
+        self,
+        element_ty,
+        logical_shape,
+        storage,
+        layout,
+        semantic,
+        *,
+        alloc_shape,
+        storage_shape,
+        logical_non_power_axis,
+    ):
+        logical_shape = tuple(logical_shape)
+        storage_shape = list(storage_shape)
+        if len(logical_shape) != len(storage_shape):
+            raise ValueError("logical SMEM stage logical/storage ranks must match")
+        if not 0 <= logical_non_power_axis < len(logical_shape):
+            raise ValueError("logical SMEM stage requires a valid non-power axis")
+        for axis, (logical, carrier) in enumerate(zip(logical_shape, storage_shape)):
+            if axis == logical_non_power_axis:
+                if carrier < logical or carrier & (carrier - 1):
+                    raise ValueError(
+                        "logical SMEM stage carrier must round its non-power axis up to a power of two"
+                    )
+            elif carrier != logical:
+                raise ValueError("logical SMEM stage may pad only its non-power axis")
+
+        # The IR memdesc and all WGMMA shape checks use the physical carrier.
+        # Keep the logical extent as frontend-only metadata on this specialized
+        # type so flatten/unflatten can reconstruct the stage losslessly.
+        super().__init__(
+            element_ty,
+            storage_shape,
+            storage,
+            layout,
+            semantic,
+            alloc_shape=alloc_shape,
+            storage_shape=storage_shape,
+        )
+        self.logical_shape = logical_shape
+        self.logical_candidate = True
+        self.logical_non_power_axis = logical_non_power_axis
+
+    def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[logical_smem_stage, int]:
+        return (
+            logical_smem_stage(
+                handles[cursor],
+                self.element_ty,
+                self.logical_shape,
+                self.storage,
+                self.layout,
+                self.semantic,
+                alloc_shape=self.alloc_shape,
+                storage_shape=self.storage_shape,
+                logical_non_power_axis=self.logical_non_power_axis,
+            ),
+            cursor + 1,
+        )
+
+    def mangle(self) -> str:
+        logical = "_".join(map(str, self.logical_shape))
+        carrier = "_".join(map(str, self.storage_shape))
+        alloc_suffix = ""
+        if self.alloc_shape != self.storage_shape:
+            alloc_suffix = f"A{'_'.join(map(str, self.alloc_shape))}"
+        return (
+            f"logical_smem_stage_{self.element_ty.mangle()}_"
+            f"L{logical}C{carrier}X{self.logical_non_power_axis}{alloc_suffix}"
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"logical_smem_stage<{self.element_ty}, logical={self.logical_shape}, "
+            f"carrier={self.shape}>"
+        )
+
+    def __eq__(self, other) -> bool:
+        return super().__eq__(other) and self.logical_shape == other.logical_shape
 
 
 class barrier(tl.base_value):
@@ -978,25 +1220,46 @@ class pipe_writer(_pipe_endpoint):
     @tl.builtin
     def acquire(self, iter, _semantic=None):
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
-        _semantic.builder.create_pipe_writer_acquire(self.pipe._field_handles(), stage.handle, phase.handle,
-                                                     self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
-                                                     self.pipe._field_names())
+        args = (
+            self.pipe._field_handles(),
+            stage.handle,
+            phase.handle,
+            self.pipe.capacity,
+            self.pipe.scope,
+            self.pipe._ir_name(),
+            self.pipe._field_names(),
+        )
+        _semantic.builder.create_pipe_writer_acquire(*args)
         return self.pipe._make_slot(stage, _semantic=_semantic)
 
     @tl.builtin
     def commit(self, iter, _semantic=None):
         stage, _ = self.pipe._stage_phase(iter, _semantic=_semantic)
-        _semantic.builder.create_pipe_writer_commit(self.pipe._field_handles(), stage.handle, self.pipe.capacity,
-                                                    self.pipe.scope, self.pipe._ir_name(), self.pipe._field_names())
+        args = (
+            self.pipe._field_handles(),
+            stage.handle,
+            self.pipe.capacity,
+            self.pipe.scope,
+            self.pipe._ir_name(),
+            self.pipe._field_names(),
+        )
+        _semantic.builder.create_pipe_writer_commit(*args)
 
     @tl.builtin
     def close(self, iter, _semantic=None):
         if self.pipe.one_shot:
             raise ValueError("tle.pipe one_shot pipes do not support close")
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
-        _semantic.builder.create_pipe_writer_close(self.pipe._field_handles(), stage.handle, phase.handle,
-                                                   self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
-                                                   self.pipe._field_names())
+        args = (
+            self.pipe._field_handles(),
+            stage.handle,
+            phase.handle,
+            self.pipe.capacity,
+            self.pipe.scope,
+            self.pipe._ir_name(),
+            self.pipe._field_names(),
+        )
+        _semantic.builder.create_pipe_writer_close(*args)
 
 
 class pipe_reader(_pipe_endpoint):
@@ -1011,20 +1274,35 @@ class pipe_reader(_pipe_endpoint):
     @tl.builtin
     def wait(self, iter, _semantic=None):
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
-        is_closed = _semantic.builder.create_pipe_reader_wait(self.pipe._field_handles(), stage.handle, phase.handle,
-                                                              self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
-                                                              self.pipe._field_names(), self.reader_name or "",
-                                                              self._reader_field_names())
+        args = (
+            self.pipe._field_handles(),
+            stage.handle,
+            phase.handle,
+            self.pipe.capacity,
+            self.pipe.scope,
+            self.pipe._ir_name(),
+            self.pipe._field_names(),
+            self.reader_name or "",
+            self._reader_field_names(),
+        )
+        is_closed = _semantic.builder.create_pipe_reader_wait(*args)
         slot = self.pipe._make_slot(stage, _semantic=_semantic, field_names=self.field_names)
         return pipe_wait_result(slot, tl.tensor(is_closed, tl.int1))
 
     @tl.builtin
     def release(self, iter, _semantic=None):
         stage, _ = self.pipe._stage_phase(iter, _semantic=_semantic)
-        _semantic.builder.create_pipe_reader_release(self.pipe._field_handles(), stage.handle,
-                                                     self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
-                                                     self.pipe._field_names(), self.reader_name or "",
-                                                     self._reader_field_names())
+        args = (
+            self.pipe._field_handles(),
+            stage.handle,
+            self.pipe.capacity,
+            self.pipe.scope,
+            self.pipe._ir_name(),
+            self.pipe._field_names(),
+            self.reader_name or "",
+            self._reader_field_names(),
+        )
+        _semantic.builder.create_pipe_reader_release(*args)
 
 
 pipe_writer_type.value_cls = pipe_writer

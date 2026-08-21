@@ -202,7 +202,7 @@ static std::optional<StaticAccessView> getStaticMemDescView(Value value) {
     // residues cannot alias. Map every stage to the same representative so
     // equal tiles conservatively overlap even when stage SSA values differ.
     srcView->offsets[0] = tile.getTile();
-    srcView->sizes[0] = 1;
+    srcView->sizes[0] = tile.getSpan();
     srcView->rank = memDescTy.getRank();
     srcView->tiledSMEM = true;
     return srcView;

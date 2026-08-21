@@ -264,9 +264,9 @@ struct TritonTleLowerWGMMAPass
               Value(), wgmma.getInputPrecision(),
               wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
           if (activeN && !isFullActiveN(wgmma, activeN))
-            dot->setAttr(kTleWgmmaActiveNAttr, activeN);
+            dot->setDiscardableAttr(kTleWgmmaActiveNAttr, activeN);
           if (activeK && !isFullActiveK(wgmma, activeK))
-            dot->setAttr(kTleWgmmaActiveKAttr, activeK);
+            dot->setDiscardableAttr(kTleWgmmaActiveKAttr, activeK);
           Value tiledB = wgmma.getB();
           if (auto transpose = tiledB.getDefiningOp<MemDescWGMMAViewOp>())
             tiledB = transpose.getSrc();
@@ -280,8 +280,8 @@ struct TritonTleLowerWGMMAPass
             dot->setDiscardableAttr(
                 kTleTiledSMEMStorageTileShapeAttr,
                 builder.getDenseI32ArrayAttr(
-                    {static_cast<int32_t>(stage.getAtomRows()),
-                     static_cast<int32_t>(stage.getAtomCols())}));
+                    {static_cast<int32_t>(stage.getStorageTileRows()),
+                     static_cast<int32_t>(stage.getStorageTileCols())}));
           }
           encodedAccs[wgmma.getD()] = dot.getD();
           for (OpOperand &use :
