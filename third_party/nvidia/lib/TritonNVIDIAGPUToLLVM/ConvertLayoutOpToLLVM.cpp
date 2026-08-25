@@ -80,10 +80,10 @@ struct ConvertLayoutOpSwizzlingConversion
   }
 
 #if defined(__TLE__) && defined(__NVIDIA__)
-  LogicalResult transferSameWarpShuffle(
-      ConvertLayoutOp op, OpAdaptor adaptor,
-      const SameWarpShufflePlan &plan,
-      ConversionPatternRewriter &rewriter) const {
+  LogicalResult
+  transferSameWarpShuffle(ConvertLayoutOp op, OpAdaptor adaptor,
+                          const SameWarpShufflePlan &plan,
+                          ConversionPatternRewriter &rewriter) const {
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto dstTy = op.getType();
@@ -99,33 +99,31 @@ struct ConvertLayoutOpSwizzlingConversion
     assert(inVals.size() == plan.srcLayout.getInDimSize(kReg));
 
     auto [laneId, logicalWarpId] = getLaneAndWarpId(rewriter, loc);
-    LinearLayout dstToSrcLane = plan.dstToSrc.sublayout(
-        {kReg, kLane, kWarp, kBlock}, {kLane});
+    LinearLayout dstToSrcLane =
+        plan.dstToSrc.sublayout({kReg, kLane, kWarp, kBlock}, {kLane});
     Value blockId = dstToSrcLane.sublayoutIsZero({kBlock}, {kLane})
                         ? b.i32_val(0)
                         : targetInfo.getClusterCTAId(rewriter, loc);
 
     SmallVector<Value> outVals;
     outVals.reserve(plan.dstLayout.getInDimSize(kReg));
-    for (unsigned dstReg = 0;
-         dstReg < plan.dstLayout.getInDimSize(kReg); ++dstReg) {
-      auto staticSrc = plan.dstToSrc.apply(
-          {{kReg, static_cast<int32_t>(dstReg)},
-           {kLane, 0},
-           {kWarp, 0},
-           {kBlock, 0}});
-      auto srcRegIt = llvm::find_if(staticSrc, [&](const auto &entry) {
-        return entry.first == kReg;
-      });
+    for (unsigned dstReg = 0; dstReg < plan.dstLayout.getInDimSize(kReg);
+         ++dstReg) {
+      auto staticSrc =
+          plan.dstToSrc.apply({{kReg, static_cast<int32_t>(dstReg)},
+                               {kLane, 0},
+                               {kWarp, 0},
+                               {kBlock, 0}});
+      auto srcRegIt = llvm::find_if(
+          staticSrc, [&](const auto &entry) { return entry.first == kReg; });
       assert(srcRegIt != staticSrc.end() &&
              static_cast<unsigned>(srcRegIt->second) < inVals.size());
 
-      auto srcLane = applyLinearLayout(
-          loc, rewriter, dstToSrcLane,
-          {{kReg, b.i32_val(dstReg)},
-           {kLane, laneId},
-           {kWarp, logicalWarpId},
-           {kBlock, blockId}});
+      auto srcLane = applyLinearLayout(loc, rewriter, dstToSrcLane,
+                                       {{kReg, b.i32_val(dstReg)},
+                                        {kLane, laneId},
+                                        {kWarp, logicalWarpId},
+                                        {kBlock, blockId}});
       assert(srcLane.size() == 1 && srcLane.front().first == kLane);
       outVals.push_back(targetInfo.shuffleIdx(
           rewriter, loc, inVals[srcRegIt->second], srcLane.front().second));

@@ -1066,9 +1066,8 @@ bool hasRegisterHardwareDims(const LinearLayout &layout,
                              const SameWarpShuffleDims &dims) {
   return layout.getNumInDims() == 4 &&
          *layout.getInDimNames().begin() == dims.reg &&
-         layout.hasInDim(dims.reg) &&
-         layout.hasInDim(dims.lane) && layout.hasInDim(dims.warp) &&
-         layout.hasInDim(dims.block);
+         layout.hasInDim(dims.reg) && layout.hasInDim(dims.lane) &&
+         layout.hasInDim(dims.warp) && layout.hasInDim(dims.block);
 }
 
 LinearLayout renameSourceHardwareDims(LinearLayout layout,
@@ -1082,8 +1081,8 @@ LinearLayout renameSourceHardwareDims(LinearLayout layout,
   return layout.renameInDim(dims.block, dims.srcBlock);
 }
 
-LinearLayout makeHardwareProjection(const LinearLayout &layout,
-                                    StringAttr warp, StringAttr block,
+LinearLayout makeHardwareProjection(const LinearLayout &layout, StringAttr warp,
+                                    StringAttr block,
                                     const SameWarpShuffleDims &dims) {
   LinearLayout::BasesT bases;
   for (const auto &[inDim, inBases] : layout.getBases()) {
@@ -1118,9 +1117,7 @@ bool imageContains(const LinearLayout &source,
   if (source.getTotalOutDimSizeLog2() > 64 ||
       source.getTotalInDimSizeLog2() > 64 ||
       destination.getTotalInDimSizeLog2() > 64 ||
-      source.getTotalInDimSizeLog2() +
-              destination.getTotalInDimSizeLog2() >
-          64)
+      source.getTotalInDimSizeLog2() + destination.getTotalInDimSizeLog2() > 64)
     return false;
 
   // The input names are deliberately disjoint. Adding destination's columns
@@ -1131,12 +1128,10 @@ bool imageContains(const LinearLayout &source,
 }
 
 bool canRestoreRegisterBroadcast(const LinearLayout &original,
-                                 const LinearLayout &stripped,
-                                 StringAttr reg) {
+                                 const LinearLayout &stripped, StringAttr reg) {
   uint32_t freeMask = original.getFreeVariableMasks().lookup(reg);
   uint32_t zeroBasisMask = 0;
-  for (auto [bit, basis] :
-       llvm::enumerate(original.getBases().lookup(reg))) {
+  for (auto [bit, basis] : llvm::enumerate(original.getBases().lookup(reg))) {
     if (llvm::all_of(basis, [](int32_t value) { return value == 0; }))
       zeroBasisMask |= 1u << bit;
   }
@@ -1154,8 +1149,7 @@ bool canRestoreRegisterBroadcast(const LinearLayout &original,
 } // namespace
 
 std::optional<SameWarpShufflePlan>
-planSameWarpShuffleConversion(RankedTensorType srcTy,
-                              RankedTensorType dstTy) {
+planSameWarpShuffleConversion(RankedTensorType srcTy, RankedTensorType dstTy) {
   if (srcTy.getShape() != dstTy.getShape() ||
       srcTy.getElementType() != dstTy.getElementType() ||
       !cvtNeedsSharedMemory(srcTy, dstTy))
@@ -1176,16 +1170,12 @@ planSameWarpShuffleConversion(RankedTensorType srcTy,
           originalDst.getInDimSize(dims.warp) ||
       originalSrc.getInDimSize(dims.block) !=
           originalDst.getInDimSize(dims.block) ||
-      getTotalElemsPerThread(srcTy) !=
-          originalSrc.getInDimSize(dims.reg) ||
-      getTotalElemsPerThread(dstTy) !=
-          originalDst.getInDimSize(dims.reg))
+      getTotalElemsPerThread(srcTy) != originalSrc.getInDimSize(dims.reg) ||
+      getTotalElemsPerThread(dstTy) != originalDst.getInDimSize(dims.reg))
     return std::nullopt;
 
-  auto removeBroadcastedSrcRegs =
-      actionRemoveBroadcastedRegs(originalSrc);
-  auto removeBroadcastedDstRegs =
-      actionRemoveBroadcastedRegs(originalDst);
+  auto removeBroadcastedSrcRegs = actionRemoveBroadcastedRegs(originalSrc);
+  auto removeBroadcastedDstRegs = actionRemoveBroadcastedRegs(originalDst);
   LinearLayout srcLayout = removeBroadcastedSrcRegs.apply(originalSrc);
   LinearLayout dstLayout = removeBroadcastedDstRegs.apply(originalDst);
 
@@ -1198,8 +1188,8 @@ planSameWarpShuffleConversion(RankedTensorType srcTy,
     dstLayout = originalDst;
   }
 
-  unsigned shuffleWords = dstLayout.getInDimSize(dims.reg) *
-                          llvm::divideCeil(bitWidth, 32u);
+  unsigned shuffleWords =
+      dstLayout.getInDimSize(dims.reg) * llvm::divideCeil(bitWidth, 32u);
   if (shuffleWords > kMaxSameWarpShuffleWords)
     return std::nullopt;
 
@@ -1210,8 +1200,8 @@ planSameWarpShuffleConversion(RankedTensorType srcTy,
     return std::nullopt;
 
   LinearLayout renamedSrc = renameSourceHardwareDims(srcLayout, dims);
-  LinearLayout srcAug = renamedSrc.concatOuts(makeHardwareProjection(
-      renamedSrc, dims.srcWarp, dims.srcBlock, dims));
+  LinearLayout srcAug = renamedSrc.concatOuts(
+      makeHardwareProjection(renamedSrc, dims.srcWarp, dims.srcBlock, dims));
   LinearLayout dstAug = dstLayout.concatOuts(
       makeHardwareProjection(dstLayout, dims.warp, dims.block, dims));
 
@@ -1241,14 +1231,12 @@ planSameWarpShuffleConversion(RankedTensorType srcTy,
   // The first lowering supports a compile-time source register per
   // destination register. Source lane may still depend on destination
   // register/lane/warp/block and is computed with applyLinearLayout.
-  if (!dstToSrc.sublayoutIsZero({dims.lane, dims.warp, dims.block},
-                                {dims.reg}))
+  if (!dstToSrc.sublayoutIsZero({dims.lane, dims.warp, dims.block}, {dims.reg}))
     return std::nullopt;
 
-  return SameWarpShufflePlan{std::move(srcLayout), std::move(dstLayout),
-                             std::move(dstToSrc),
-                             std::move(removeBroadcastedSrcRegs),
-                             std::move(removeBroadcastedDstRegs)};
+  return SameWarpShufflePlan{
+      std::move(srcLayout), std::move(dstLayout), std::move(dstToSrc),
+      std::move(removeBroadcastedSrcRegs), std::move(removeBroadcastedDstRegs)};
 }
 #endif // defined(__TLE__) && defined(__NVIDIA__)
 
