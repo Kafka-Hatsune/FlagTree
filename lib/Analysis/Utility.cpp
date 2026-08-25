@@ -1026,7 +1026,7 @@ bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy) {
   return false;
 }
 
-#ifdef __TLE__
+#if defined(__TLE__) && defined(__NVIDIA__)
 namespace {
 
 constexpr unsigned kNvidiaWarpSize = 32;
@@ -1250,7 +1250,7 @@ planSameWarpShuffleConversion(RankedTensorType srcTy,
                              std::move(removeBroadcastedSrcRegs),
                              std::move(removeBroadcastedDstRegs)};
 }
-#endif
+#endif // defined(__TLE__) && defined(__NVIDIA__)
 
 bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
   return !cvtReordersRegisters(srcTy, dstTy) &&
