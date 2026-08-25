@@ -122,10 +122,10 @@ getNvidiaAllocationAnalysisScratchSizeFn(TargetInfoBase &targetInfo) {
     if (auto cvtOp = dyn_cast<triton::gpu::ConvertLayoutOp>(op)) {
       auto srcTy = cvtOp.getSrc().getType();
       auto dstTy = cvtOp.getType();
-#ifdef __TLE__
+#if defined(__TLE__) && defined(__NVIDIA__)
       if (planSameWarpShuffleConversion(srcTy, dstTy))
         return 0;
-#endif
+#endif // defined(__TLE__) && defined(__NVIDIA__)
       if (!cvtNeedsSharedMemory(srcTy, dstTy))
         return 0;
       // In cuda we always swizzle
