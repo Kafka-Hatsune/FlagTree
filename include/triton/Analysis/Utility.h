@@ -303,8 +303,7 @@ struct SameWarpShufflePlan {
 // profitably by the NVIDIA lowering.  Keeping the complete plan in Analysis
 // makes scratch allocation and lowering use exactly the same decision.
 std::optional<SameWarpShufflePlan>
-planSameWarpShuffleConversion(RankedTensorType srcTy,
-                              RankedTensorType dstTy);
+planSameWarpShuffleConversion(RankedTensorType srcTy, RankedTensorType dstTy);
 #endif // defined(__TLE__) && defined(__NVIDIA__)
 
 // Conversion from `srcTy` to `dstTy` involves data exchange across threads,
