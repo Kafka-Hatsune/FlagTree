@@ -37,10 +37,10 @@ struct ConvertLayoutOpSwizzlingConversion
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
 
-#ifdef __TLE__
+#if defined(__TLE__) && defined(__NVIDIA__)
     if (auto plan = planSameWarpShuffleConversion(srcTy, dstTy))
       return transferSameWarpShuffle(op, adaptor, *plan, rewriter);
-#endif
+#endif // defined(__TLE__) && defined(__NVIDIA__)
 
     LinearLayout conversion = minimalCvtLayout(srcTy, dstTy);
     LinearLayout srcLayout = toLinearLayout(srcTy);
@@ -79,7 +79,7 @@ struct ConvertLayoutOpSwizzlingConversion
     return failure();
   }
 
-#ifdef __TLE__
+#if defined(__TLE__) && defined(__NVIDIA__)
   LogicalResult transferSameWarpShuffle(
       ConvertLayoutOp op, OpAdaptor adaptor,
       const SameWarpShufflePlan &plan,
@@ -140,7 +140,7 @@ struct ConvertLayoutOpSwizzlingConversion
     rewriter.replaceOp(op, result);
     return success();
   }
-#endif
+#endif // defined(__TLE__) && defined(__NVIDIA__)
 
   SmallVector<Value> transferWithinBlockSwizzling(
       Location loc, ConversionPatternRewriter &rewriter,
