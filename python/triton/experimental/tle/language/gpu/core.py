@@ -1166,7 +1166,7 @@ def copy(
                 capacity=1,
             )
             stage = local_buf.slot(0)
-            tle.copy(desc_16x64, stage, [80, 256], [0, 0])
+            tle.copy(desc_16x256, stage, [80, 256], [0, 0])
     """
     mthreads_enabled = mthreads_common.enabled()
     iluvatar_enabled = iluvatar_copy.enabled()
@@ -1309,7 +1309,8 @@ def copy(
         if barrier is not None:
             raise ValueError(
                 "logical candidate SMEM copy does not support an explicit "
-                "completion barrier; publish its generated atom copies "
+                "completion barrier; publish its generated storage-tile "
+                "copies "
                 "through tle.pipe writer.commit"
             )
         if isinstance(offsets, tl.tuple):
@@ -1397,7 +1398,7 @@ def copy(
             raise ValueError(
                 "exact tiled SMEM copy requires a tensor descriptor: "
                 "a pointer tensor does not carry the strides needed to derive "
-                "all atom addresses"
+                "all storage-tile addresses"
             )
         if mask is not None or other is not None:
             raise ValueError(

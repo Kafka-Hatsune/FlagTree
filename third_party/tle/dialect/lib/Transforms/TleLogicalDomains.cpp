@@ -12,6 +12,7 @@
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -79,6 +80,20 @@ static LogicalRootRewriteAction *findRootAction(LogicalDomainPlan &plan,
     if (action.alloc.getOperation() == root)
       return &action;
   return nullptr;
+}
+
+static LogicalResult
+selectRootStorageTile(LogicalRootRewriteAction &root,
+                      ArrayRef<int64_t> storageTile, Operation *anchor) {
+  if (root.storageTileShape.empty()) {
+    root.storageTileShape.assign(storageTile.begin(), storageTile.end());
+    return success();
+  }
+  if (ArrayRef<int64_t>(root.storageTileShape) != storageTile)
+    return anchor->emitOpError(
+        "all producers of one logical root must use the same exact-SMEM "
+        "storage tile");
+  return success();
 }
 
 static LogicalDomainProvenance
@@ -204,6 +219,29 @@ reshapeOnlyUnitDimensions(ArrayRef<int64_t> sourcePhysical,
 }
 
 } // namespace
+
+FailureOr<SmallVector<int64_t, 2>>
+selectLogicalSMEMStorageTileShape(ttg::MemDescType stageType,
+                                  ArrayRef<int64_t> logicalShape) {
+  if (stageType.getRank() != 2 || logicalShape.size() != 2)
+    return failure();
+  if (!isa<ttg::NVMMASharedEncodingAttr>(stageType.getEncoding()))
+    return failure();
+
+  bool fragmentedRows = !llvm::isPowerOf2_64(logicalShape[0]);
+  bool fragmentedCols = !llvm::isPowerOf2_64(logicalShape[1]);
+  if (fragmentedRows == fragmentedCols)
+    return failure();
+  unsigned fragmentAxis = fragmentedRows ? 0u : 1u;
+  SmallVector<int64_t, 2> storageTile(logicalShape.begin(),
+                                      logicalShape.end());
+  storageTile[fragmentAxis] = largestPowerOfTwoDivisorNoGreaterThan(
+      logicalShape[fragmentAxis], logicalShape[fragmentAxis]);
+  if (storageTile[fragmentAxis] < kExactSMEMFragmentQuantum ||
+      logicalShape[fragmentAxis] % storageTile[fragmentAxis] != 0)
+    return failure();
+  return storageTile;
+}
 
 namespace {
 
@@ -1153,18 +1191,13 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       return emitError(copy, index,
                        "logical TMA descriptor block must have only unit "
                        "leading dimensions");
-    unsigned fragmentAxis =
-        llvm::isPowerOf2_64(state->logicalShape[0]) ? 1u : 0u;
-    SmallVector<int64_t, 2> storageTile(state->logicalShape.begin(),
-                                        state->logicalShape.end());
-    storageTile[fragmentAxis] = largestPowerOfTwoDivisorNoGreaterThan(
-        state->logicalShape[fragmentAxis],
-        state->logicalShape[fragmentAxis]);
-    if (storageTile[fragmentAxis] < 16 ||
-        state->logicalShape[fragmentAxis] % storageTile[fragmentAxis] != 0)
+    FailureOr<SmallVector<int64_t, 2>> selectedStorageTile =
+        selectLogicalSMEMStorageTileShape(dstType, state->logicalShape);
+    if (failed(selectedStorageTile))
       return emitError(copy, index,
                        "logical stage has no exact power-of-two storage tile "
                        "of at least 16 along its fragment axis");
+    SmallVector<int64_t, 2> storageTile = std::move(*selectedStorageTile);
     if (blockShape.take_back(2) != ArrayRef<int64_t>(storageTile)) {
       InFlightDiagnostic diag = copy.emitOpError(
           "logical-domain operand 1 rejected: descriptor-driven exact-SMEM "
@@ -1193,13 +1226,8 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       auto *root = findRootAction(plan, state->provenance.primaryRoot());
       if (!root)
         return emitError(copy, index, "candidate root has no storage action");
-      if (root->storageTileShape.empty())
-        root->storageTileShape.assign(storageTile.begin(), storageTile.end());
-      else if (ArrayRef<int64_t>(root->storageTileShape) !=
-               ArrayRef<int64_t>(storageTile))
-        return emitError(copy, index,
-                         "all TMA producers of one logical root must use the "
-                         "same exact-SMEM storage tile");
+      if (failed(selectRootStorageTile(*root, storageTile, copy)))
+        return failure();
       if (!llvm::is_contained(root->copies, copy))
         root->copies.push_back(copy);
     }
@@ -2075,7 +2103,7 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
     }
     if (root.copies.empty() || !root.reachesWGMMA) {
       root.alloc->emitOpError(
-          "logical domain must reach both logical TMA and WGMMA terminals");
+          "logical domain must reach both an exact producer and WGMMA");
       return failure();
     }
   }
