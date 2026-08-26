@@ -117,6 +117,9 @@ struct LogicalDomainPlan {
   DenseMap<Value, TensorFragmentState> tensors;
 };
 
+FailureOr<SmallVector<int64_t, 2>>
+selectLogicalSMEMStorageTileShape(gpu::MemDescType stageType,
+                                  ArrayRef<int64_t> logicalShape);
 FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module);
 void applyLogicalDomainPlan(LogicalDomainPlan &&plan);
 
