@@ -20,13 +20,18 @@
 
 # flagtree tle
 
+from __future__ import annotations
+
 import math
 
 import triton.language.core as tl
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, TYPE_CHECKING
 from abc import abstractmethod
 from triton._C.libtriton import ir
 from triton.language.semantic import TritonSemantic
+
+if TYPE_CHECKING:
+    from .. import TLESemantic
 
 
 class scope():
@@ -69,6 +74,174 @@ class layout:
 
     def to_ir(self, builder: ir.builder) -> None:
         raise NotImplementedError(f"{self.__class__.__name__}.to_ir() must be overridden in subclasses")
+
+
+class distributed_encoding(layout):
+    """Base class for explicit TritonGPU distributed tensor encodings."""
+
+    @property
+    def rank(self):
+        raise NotImplementedError(f"{self.__class__.__name__}.rank must be overridden in subclasses")
+
+
+class BlockEncoding(distributed_encoding):
+    """Explicit #ttg.blocked encoding for TLE tensor values."""
+
+    def __init__(self, size_per_thread, threads_per_warp, warps_per_cta, order, cga_layout=None):
+        super().__init__()
+        self.size_per_thread = [int(tl._unwrap_if_constexpr(x)) for x in size_per_thread]
+        self.threads_per_warp = [int(tl._unwrap_if_constexpr(x)) for x in threads_per_warp]
+        self.warps_per_cta = [int(tl._unwrap_if_constexpr(x)) for x in warps_per_cta]
+        self.order = [int(tl._unwrap_if_constexpr(x)) for x in order]
+        self.cga_layout = [] if cga_layout is None else [[int(tl._unwrap_if_constexpr(x))
+                                                          for x in basis]
+                                                         for basis in cga_layout]
+
+        rank = len(self.order)
+        if not (len(self.size_per_thread) == len(self.threads_per_warp) == len(self.warps_per_cta) == rank):
+            raise ValueError("BlockEncoding fields must have the same rank")
+        if sorted(self.order) != list(range(rank)):
+            raise ValueError(f"BlockEncoding order must be a permutation of 0..{rank - 1}")
+        for basis in self.cga_layout:
+            if len(basis) != rank:
+                raise ValueError("BlockEncoding cga_layout basis rank mismatch")
+
+    @property
+    def rank(self):
+        return len(self.order)
+
+    def to_ir(self, builder: ir.builder) -> None:
+        return builder.get_blocked_encoding(
+            self.size_per_thread,
+            self.threads_per_warp,
+            self.warps_per_cta,
+            self.order,
+            self.cga_layout,
+        )
+
+    def __repr__(self):
+        return (f"BlockEncoding(size_per_thread={self.size_per_thread}, "
+                f"threads_per_warp={self.threads_per_warp}, warps_per_cta={self.warps_per_cta}, "
+                f"order={self.order}, cga_layout={self.cga_layout})")
+
+    def __eq__(self, other) -> bool:
+        return (type(self) is type(other) and self.size_per_thread == other.size_per_thread
+                and self.threads_per_warp == other.threads_per_warp and self.warps_per_cta == other.warps_per_cta
+                and self.order == other.order and self.cga_layout == other.cga_layout)
+
+    def __hash__(self):
+        return hash((tuple(self.size_per_thread), tuple(self.threads_per_warp), tuple(self.warps_per_cta),
+                     tuple(self.order), tuple(tuple(basis) for basis in self.cga_layout)))
+
+
+class MmaEncoding(distributed_encoding):
+    """Explicit #ttg.nvidia_mma encoding for a dot result or accumulator."""
+
+    def __init__(self, version, warps_per_cta, instr_shape, cga_layout=None):
+        super().__init__()
+        self.version = [int(tl._unwrap_if_constexpr(x)) for x in version]
+        self.warps_per_cta = [int(tl._unwrap_if_constexpr(x)) for x in warps_per_cta]
+        self.instr_shape = [int(tl._unwrap_if_constexpr(x)) for x in instr_shape]
+        self.cga_layout = [] if cga_layout is None else [[int(tl._unwrap_if_constexpr(x))
+                                                          for x in basis]
+                                                         for basis in cga_layout]
+
+        rank = len(self.warps_per_cta)
+        if len(self.version) != 2:
+            raise ValueError("MmaEncoding version must contain major and minor")
+        if len(self.instr_shape) != rank:
+            raise ValueError("MmaEncoding instr_shape rank must match warps_per_cta")
+        for basis in self.cga_layout:
+            if len(basis) != rank:
+                raise ValueError("MmaEncoding cga_layout basis rank mismatch")
+
+    @property
+    def rank(self):
+        return len(self.warps_per_cta)
+
+    def to_ir(self, builder: ir.builder) -> None:
+        return builder.get_mma_layout(
+            self.version,
+            self.warps_per_cta,
+            self.cga_layout,
+            self.instr_shape,
+        )
+
+    def __repr__(self):
+        return (f"MmaEncoding(version={self.version}, warps_per_cta={self.warps_per_cta}, "
+                f"instr_shape={self.instr_shape}, cga_layout={self.cga_layout})")
+
+    def __eq__(self, other) -> bool:
+        return (type(self) is type(other) and self.version == other.version
+                and self.warps_per_cta == other.warps_per_cta and self.instr_shape == other.instr_shape
+                and self.cga_layout == other.cga_layout)
+
+    def __hash__(self):
+        return hash((tuple(self.version), tuple(self.warps_per_cta), tuple(self.instr_shape),
+                     tuple(tuple(basis) for basis in self.cga_layout)))
+
+
+class DotOperandEncoding(distributed_encoding):
+    """Explicit #ttg.dot_op encoding tied to a distributed parent layout."""
+
+    def __init__(self, operand_index, parent, k_width):
+        super().__init__()
+        self.operand_index = int(tl._unwrap_if_constexpr(operand_index))
+        self.parent = tl._unwrap_if_constexpr(parent)
+        self.k_width = int(tl._unwrap_if_constexpr(k_width))
+        if self.operand_index not in (0, 1):
+            raise ValueError("DotOperandEncoding operand_index must be 0 or 1")
+        if not isinstance(self.parent, distributed_encoding):
+            raise ValueError(f"DotOperandEncoding parent must be a distributed_encoding, got {type(self.parent)}")
+        if self.k_width <= 0:
+            raise ValueError("DotOperandEncoding k_width must be positive")
+
+    @property
+    def rank(self):
+        return self.parent.rank
+
+    def to_ir(self, builder: ir.builder) -> None:
+        return builder.get_dot_operand_layout(self.operand_index, self.parent.to_ir(builder), self.k_width)
+
+    def __repr__(self):
+        return (f"DotOperandEncoding(operand_index={self.operand_index}, parent={self.parent!r}, "
+                f"k_width={self.k_width})")
+
+    def __eq__(self, other) -> bool:
+        return (type(self) is type(other) and self.operand_index == other.operand_index and self.parent == other.parent
+                and self.k_width == other.k_width)
+
+    def __hash__(self):
+        return hash((self.operand_index, self.parent, self.k_width))
+
+
+class SlicedEncoding(distributed_encoding):
+    """Slice of a parent distributed tensor encoding."""
+
+    def __init__(self, dim, parent):
+        super().__init__()
+        self.dim = int(tl._unwrap_if_constexpr(dim))
+        self.parent = tl._unwrap_if_constexpr(parent)
+        if not isinstance(self.parent, distributed_encoding):
+            raise ValueError(f"SlicedEncoding parent must be a distributed_encoding, got {type(self.parent)}")
+        if self.dim < 0 or self.dim >= self.parent.rank:
+            raise ValueError(f"SlicedEncoding dim {self.dim} out of range for rank {self.parent.rank}")
+
+    @property
+    def rank(self):
+        return self.parent.rank - 1
+
+    def to_ir(self, builder: ir.builder) -> None:
+        return builder.get_sliced_encoding(self.dim, self.parent.to_ir(builder))
+
+    def __repr__(self):
+        return f"SlicedEncoding(dim={self.dim}, parent={self.parent!r})"
+
+    def __eq__(self, other) -> bool:
+        return type(self) is type(other) and self.dim == other.dim and self.parent == other.parent
+
+    def __hash__(self):
+        return hash((self.dim, self.parent))
 
 
 class shared_layout(layout):
@@ -289,11 +462,9 @@ def _make_reshape_layout(src_layout: shared_layout, dst_shape: List[int]) -> sha
     """Rebuild an NV-MMA encoding when core reshape inference preserves it."""
     rank = len(dst_shape)
     if not isinstance(src_layout, nv_mma_shared_layout):
-        raise ValueError(
-            "buffered_tensor.reshape currently requires nv_mma_shared_layout; "
-            "other shared encodings lower to SharedLinearEncoding, which TLE "
-            "does not expose yet"
-        )
+        raise ValueError("buffered_tensor.reshape currently requires nv_mma_shared_layout; "
+                         "other shared encodings lower to SharedLinearEncoding, which TLE "
+                         "does not expose yet")
     if any(value != 1 for value in (*src_layout.numCTAsPerCGA, *src_layout.numCTASplit)):
         raise ValueError("buffered_tensor.reshape currently requires a single-CTA nv_mma_shared_layout")
 
@@ -356,7 +527,7 @@ class buffered_tensor(tl.base_value):
         handles.append(self.handle)
 
     @tl.builtin
-    def slot(self, stage, _semantic=None):
+    def slot(self, stage, _semantic: TLESemantic | None = None):
         if len(self.shape) < 2:
             raise ValueError("buffered_tensor.slot requires a rank >= 2 buffer")
         if self.type.storage is not smem:
@@ -387,9 +558,7 @@ class buffered_tensor(tl.base_value):
         if not shape or any(dim <= 0 for dim in shape):
             raise ValueError(f"buffered_tensor.reshape dimensions must be positive, got {shape}")
         if math.prod(shape) != math.prod(self.shape):
-            raise ValueError(
-                f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}"
-            )
+            raise ValueError(f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}")
         handle = _semantic.builder.create_memdesc_reshape(self.handle, shape)
         reshaped_layout = _make_reshape_layout(self.type.layout, shape)
         return buffered_tensor(
@@ -545,7 +714,7 @@ class barrier(tl.base_value):
         handles.append(self.handle)
 
     @tl.builtin
-    def __getitem__(self, index, _semantic=None):
+    def __getitem__(self, index, _semantic: TLESemantic | None = None):
         if self.is_slot:
             raise ValueError("tle.gpu barrier slot cannot be indexed again")
 
@@ -856,7 +1025,7 @@ class pipe_value(tl.base_value):
     def _ir_name(self):
         return "" if self.name is None else self.name
 
-    def _make_slot(self, stage, _semantic=None, field_names=None):
+    def _make_slot(self, stage, _semantic: TLESemantic | None = None, field_names=None):
         if field_names is None:
             fields = self.fields.items()
         else:
@@ -864,7 +1033,7 @@ class pipe_value(tl.base_value):
         return pipe_slot({name: field.slot(stage, _semantic=_semantic) for name, field in fields})
 
     @tl.builtin
-    def _stage_phase(self, iter, _semantic=None):
+    def _stage_phase(self, iter, _semantic: TLESemantic | None = None):
         iter = tl._unwrap_if_constexpr(iter)
         if isinstance(iter, int):
             stage = iter % self.capacity
@@ -878,11 +1047,11 @@ class pipe_value(tl.base_value):
         return _semantic.to_tensor(stage), _semantic.to_tensor(phase)
 
     @tl.builtin
-    def writer(self, _semantic=None):
+    def writer(self, _semantic: TLESemantic | None = None):
         return pipe_writer(self)
 
     @tl.builtin
-    def reader(self, name=None, fields=None, _semantic=None):
+    def reader(self, name=None, fields=None, _semantic: TLESemantic | None = None):
         reader_name = _validate_pipe_reader_name(self, name)
         field_names = _validate_pipe_reader_fields(self, fields)
         return pipe_reader(self, reader_name=reader_name, field_names=field_names)
@@ -972,7 +1141,7 @@ class pipe_writer(_pipe_endpoint):
         super().__init__(pipe)
 
     @tl.builtin
-    def acquire(self, iter, _semantic=None):
+    def acquire(self, iter, _semantic: TLESemantic | None = None):
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
         _semantic.builder.create_pipe_writer_acquire(self.pipe._field_handles(), stage.handle, phase.handle,
                                                      self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
@@ -980,13 +1149,13 @@ class pipe_writer(_pipe_endpoint):
         return self.pipe._make_slot(stage, _semantic=_semantic)
 
     @tl.builtin
-    def commit(self, iter, _semantic=None):
+    def commit(self, iter, _semantic: TLESemantic | None = None):
         stage, _ = self.pipe._stage_phase(iter, _semantic=_semantic)
         _semantic.builder.create_pipe_writer_commit(self.pipe._field_handles(), stage.handle, self.pipe.capacity,
                                                     self.pipe.scope, self.pipe._ir_name(), self.pipe._field_names())
 
     @tl.builtin
-    def close(self, iter, _semantic=None):
+    def close(self, iter, _semantic: TLESemantic | None = None):
         if self.pipe.one_shot:
             raise ValueError("tle.pipe one_shot pipes do not support close")
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
@@ -1005,7 +1174,7 @@ class pipe_reader(_pipe_endpoint):
         return list(self.field_names)
 
     @tl.builtin
-    def wait(self, iter, _semantic=None):
+    def wait(self, iter, _semantic: TLESemantic | None = None):
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
         is_closed = _semantic.builder.create_pipe_reader_wait(self.pipe._field_handles(), stage.handle, phase.handle,
                                                               self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),
@@ -1015,7 +1184,7 @@ class pipe_reader(_pipe_endpoint):
         return pipe_wait_result(slot, tl.tensor(is_closed, tl.int1))
 
     @tl.builtin
-    def release(self, iter, _semantic=None):
+    def release(self, iter, _semantic: TLESemantic | None = None):
         stage, _ = self.pipe._stage_phase(iter, _semantic=_semantic)
         _semantic.builder.create_pipe_reader_release(self.pipe._field_handles(), stage.handle,
                                                      self.pipe.capacity, self.pipe.scope, self.pipe._ir_name(),

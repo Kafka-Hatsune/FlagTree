@@ -76,7 +76,8 @@ extern tle::DSLRegionOp createTLERawRegionDeferred(
     TritonOpBuilder &self, std::string_view sourceId,
     std::string_view regionDialect, std::string_view argDialect,
     const std::vector<Value> &args,
-    const std::vector<int64_t> &aliasOperandIndices, std::string_view hint);
+    const std::vector<int64_t> &aliasOperandIndices, std::string_view hint,
+    std::string_view dsl_file_name, std::string_view extern_func_name);
 
 void init_triton_tle_ir(py::module &&m) {
 
@@ -375,6 +376,13 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<ttg::MemDescSubsliceOp>(resultType, src,
                                                         offsets);
            })
+      .def("create_memdesc_alias",
+           [](TritonOpBuilder &self, Type resultType, Value src,
+              int64_t offsetBytes) -> Value {
+             return self.create<tle::MemDescAliasOp>(
+                 resultType, src,
+                 self.getBuilder().getI64IntegerAttr(offsetBytes));
+           })
       .def("create_warp_return",
            [](TritonOpBuilder &self) -> Operation * {
              return self.create<ttg::WarpReturnOp>();
@@ -631,6 +639,11 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<tle::GetDeviceIdOp>(resultTy,
                                                     src.value_or(Value()));
            })
+      .def("get_world_rank",
+           [](TritonOpBuilder &self, Type resultTy, Value src) -> Value {
+             auto &builder = self.getBuilder();
+             return self.create<tle::GetWorldRankOp>(resultTy, src);
+           })
       .def("get_n_pes",
            [](TritonOpBuilder &self, Type resultTy, Value src) -> Value {
              auto &builder = self.getBuilder();
@@ -749,7 +762,8 @@ void init_tle_raw_ir(py::module &&m) {
   builder_cls->def(
       "create_tle_raw_region_deferred", &createTLERawRegionDeferred,
       py::arg("source_id"), py::arg("region_dialect"), py::arg("arg_dialect"),
-      py::arg("args"), py::arg("output_operand_indices"), py::arg("hint") = "");
+      py::arg("args"), py::arg("output_operand_indices"), py::arg("hint") = "",
+      py::arg("dsl_file_name") = "", py::arg("extern_func_name") = "");
   builder_cls->def("get_context", &TritonOpBuilder::getContext);
 }
 

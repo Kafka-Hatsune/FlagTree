@@ -24,9 +24,12 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, asdict
 from itertools import product
-from typing import Any, Iterable, Mapping, Sequence, List, Tuple, Union, Optional, Dict
+from typing import Any, Iterable, Mapping, Sequence, List, Tuple, Union, Optional, Dict, TYPE_CHECKING
 from enum import Enum
 import triton.language.core as tl
+
+if TYPE_CHECKING:
+    from . import TLESemantic
 
 Axis = Tuple[str, int]
 AxesLike = Union[int, List[Axis]]
@@ -63,7 +66,7 @@ def _parse_src_arg(builder, src, index=0):
 
 # Get the current device id
 @tl.builtin
-def _get_local_rank(device_dptr, _semantic=None, ret_dtype=tl.int32):
+def _get_local_rank(device_dptr, _semantic: TLESemantic | None = None, ret_dtype=tl.int32):
     builder = _semantic.builder
     ret_ir_ty = ret_dtype.to_ir(builder)
     ptr = _parse_src_arg(builder, device_dptr, 1)
@@ -71,12 +74,23 @@ def _get_local_rank(device_dptr, _semantic=None, ret_dtype=tl.int32):
     return tl.tensor(result, ret_dtype)
 
 
-# The number of devices in the world
+# Get the current world rank
 @tl.builtin
-def n_pes(dev_mem_ptr, _semantic=None, ret_dtype=tl.int32):
+def _get_world_rank(device_dptr, _semantic=None, ret_dtype=tl.int32):
     builder = _semantic.builder
     ret_ir_ty = ret_dtype.to_ir(builder)
-    result = builder.get_n_pes(ret_ir_ty, dev_mem_ptr.handle)
+    ptr = _parse_src_arg(builder, device_dptr, 1)
+    result = builder.get_world_rank(ret_ir_ty, ptr)
+    return tl.tensor(result, ret_dtype)
+
+
+# The number of devices on the current node
+@tl.builtin
+def n_pes(dev_mem_ptr, _semantic: TLESemantic | None = None, ret_dtype=tl.int32):
+    builder = _semantic.builder
+    ret_ir_ty = ret_dtype.to_ir(builder)
+    ptr = _parse_src_arg(builder, dev_mem_ptr, 1)
+    result = builder.get_n_pes(ret_ir_ty, ptr)
     return tl.tensor(result, ret_dtype)
 
 
@@ -580,7 +594,7 @@ def _infer_submesh_barrier_group(
     )
 
 
-def _apply_mesh_cluster_launch(mesh: device_mesh, _semantic) -> tuple[int, int, int]:
+def _apply_mesh_cluster_launch(mesh: device_mesh, _semantic: TLESemantic | None) -> tuple[int, int, int]:
     cluster_dims = _mesh_to_cluster_dims(mesh)
     options = getattr(_semantic.builder, "options", None)
     if options is None:
@@ -597,7 +611,7 @@ def _apply_mesh_cluster_launch(mesh: device_mesh, _semantic) -> tuple[int, int, 
     return cluster_dims
 
 
-def _apply_mesh_grid_launch(mesh: device_mesh, _semantic) -> None:
+def _apply_mesh_grid_launch(mesh: device_mesh, _semantic: TLESemantic | None) -> None:
     options = getattr(_semantic.builder, "options", None)
     if options is None:
         return
@@ -633,19 +647,27 @@ def shard_id(
     mesh: device_mesh,
     axis: str | int,
     device_dptr=None,
-    _semantic=None,
+    _semantic: TLESemantic | None = None,
 ):
     """
     Return current shard coordinate on the given launch mesh axis.
 
     `axis` can be axis name (`str`) or axis index (`int`, supports negative).
+    `device` returns the intra-node rank; `node` returns the inter-node rank.
     The returned value is a scalar int32 tensor.
     """
     mesh = tl._unwrap_if_constexpr(mesh)
     axis = tl._unwrap_if_constexpr(axis)
 
-    if axis in ("device", "node"):
+    if axis in ("device", "node") and device_dptr is None:
+        raise ValueError(f"device_dptr is required for axis {axis!r}")
+
+    if axis == "device":
         return _get_local_rank(device_dptr, _semantic=_semantic, ret_dtype=tl.int32)
+    if axis == "node":
+        world_rank = _get_world_rank(device_dptr, _semantic=_semantic, ret_dtype=tl.int32)
+        local_world_size = n_pes(device_dptr, _semantic=_semantic, ret_dtype=tl.int32)
+        return _semantic.floordiv(world_rank, local_world_size)
 
     if not isinstance(mesh, device_mesh):
         raise TypeError(f"mesh must be device_mesh, got {type(mesh).__name__}")
@@ -682,7 +704,8 @@ def _parse_device_barrier_args(argType) -> str:
 def check_and_handle_device_intra_barrier(space: str = None, device_dptr=None,
                                           barrier_kind: BarrierKind | str = BarrierKind.SYNC,
                                           group_kind: str | GroupKind = GroupKind.BLOCK, index: int | None = 0,
-                                          order: MemoryOrder | str | int | None = MemoryOrder.ACQ_REL, _semantic=None):
+                                          order: MemoryOrder | str | int | None = MemoryOrder.ACQ_REL,
+                                          _semantic: TLESemantic | None = None):
     if space and space in ("device", "node"):
         builder = _semantic.builder
         ptr = _parse_src_arg(builder, device_dptr, 1)
@@ -702,8 +725,8 @@ def check_and_handle_device_intra_barrier(space: str = None, device_dptr=None,
 def distributed_barrier(mesh: device_mesh | None = None, device_dptr=None, space: str = None,
                         group_kind: str | GroupKind = GroupKind.BLOCK,
                         barrier_kind: BarrierKind | str = BarrierKind.SYNC,
-                        order: MemoryOrder | str | int | None = MemoryOrder.ACQ_REL, _semantic=None,
-                        index: int | None = 0):
+                        order: MemoryOrder | str | int | None = MemoryOrder.ACQ_REL,
+                        _semantic: TLESemantic | None = None, index: int | None = 0):
     """
     M3 entrypoint: distributed synchronization primitive.
 
@@ -826,7 +849,7 @@ def _normalize_runtime_remote_shard_id_tensor(shard_id_tensor: tl.tensor) -> tl.
 def _create_remote_pointers_tensor(
     tensor: tl.tensor,
     shard_id_tensor: tl.tensor,
-    _semantic,
+    _semantic: TLESemantic | None,
     dtype: tl.dtype = None,
     space: str = "cluster",
     offset: int | tl.tensor | None = None,
@@ -919,7 +942,7 @@ def _remote_pointer(
     scope: device_mesh | None = None,
     dtype: tl.dtype = None,
     offset: int | tl.tensor | None = None,
-    _semantic=None,
+    _semantic: TLESemantic | None = None,
 ) -> tl.tensor:
 
     if not isinstance(tensor, tl.tensor) and space not in ("device", "node"):
@@ -957,7 +980,7 @@ def remote(
     space: str = "cluster",
     dtype: tl.dtype = None,
     offset: int | tl.tensor | None = None,
-    _semantic=None,
+    _semantic: TLESemantic | None = None,
 ):
     """
     M3 entrypoint: mark distributed access target.

@@ -21,6 +21,7 @@
 # flagtree tle
 from .core import (
     pipeline,
+    range,
     alloc,
     alloc_barrier,
     alloc_barriers,
@@ -32,8 +33,10 @@ from .core import (
     warp_specialize,
     wgmma,
     wgmma_wait,
+    set_layout,
 )
-from .types import (layout, shared_layout, swizzled_shared_layout, tensor_memory_layout, nv_mma_shared_layout, scope,
+from .types import (layout, distributed_encoding, BlockEncoding, MmaEncoding, DotOperandEncoding, SlicedEncoding,
+                    shared_layout, swizzled_shared_layout, tensor_memory_layout, nv_mma_shared_layout, scope,
                     buffered_tensor, buffered_tensor_type, barrier, barrier_type, smem, tmem, PENDING, READY)
 
 # Backward-compat alias expected by existing tests/tutorials.
@@ -41,6 +44,7 @@ storage_kind = memory_space
 
 __all__ = [
     "pipeline",
+    "range",
     "alloc",
     "alloc_barrier",
     "alloc_barriers",
@@ -51,8 +55,14 @@ __all__ = [
     "warp_specialize",
     "wgmma",
     "wgmma_wait",
+    "set_layout",
     "storage_kind",
     "layout",
+    "distributed_encoding",
+    "BlockEncoding",
+    "MmaEncoding",
+    "DotOperandEncoding",
+    "SlicedEncoding",
     "memory_space",
     "shared_layout",
     "swizzled_shared_layout",

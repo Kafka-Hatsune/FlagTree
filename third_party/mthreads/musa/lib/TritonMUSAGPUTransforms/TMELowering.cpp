@@ -98,9 +98,19 @@ static LogicalResult lowerDescriptorLoad(tt::DescriptorLoadOp op,
   Value localLoadValue;
   auto getLocalLoadValue = [&]() -> Value {
     if (!localLoadValue) {
+#ifdef __TLE__
+      auto localLoad =
+          ttg::LocalLoadOp::create(rewriter, loc, op.getType(), alloc);
+      if (Attribute explicitEncoding =
+              getTleExplicitValueEncoding(op.getResult()))
+        setTleExplicitResultEncoding(localLoad.getOperation(), 0,
+                                     explicitEncoding);
+      localLoadValue = localLoad.getResult();
+#else
       localLoadValue =
           ttg::LocalLoadOp::create(rewriter, loc, op.getType(), alloc)
               .getResult();
+#endif // __TLE__
     }
     return localLoadValue;
   };
@@ -197,6 +207,24 @@ static LogicalResult lowerTMACopy(ttg::TMACopyOp op, RewriterBase &rewriter) {
         triton::musa::TMECopyKind::GlobalToLocal);
     if (failed(config))
       return op.emitOpError("unable to resolve final TME load config");
+
+    // An explicitly supplied TLE completion barrier belongs to the caller's
+    // staged pipeline.  Preserve that hardware barrier ID and defer its
+    // transaction accounting/arrival protocol to the TLE pipeline lowering;
+    // do not allocate a hidden per-copy barrier here.
+    if (Value completionBarrier = op.getCompletionBarrier()) {
+      auto expectBytes = op->getAttrOfType<IntegerAttr>("expect_bytes");
+      if (!expectBytes || expectBytes.getInt() <= 0)
+        return op.emitOpError(
+            "completion barrier requires positive expect_bytes");
+      auto asyncCopy = triton::musa::createAsyncTMECopyGlobalToLocal(
+          rewriter, loc, op.getSrc(), *coord, completionBarrier, op.getDst(),
+          pred, *config);
+      asyncCopy->setAttr("musa_tle.expect_bytes",
+                         rewriter.getI32IntegerAttr(expectBytes.getInt()));
+      rewriter.eraseOp(op);
+      return success();
+    }
 
     auto barId = triton::musa::reserveFreshBarrierId(op);
     if (failed(barId))

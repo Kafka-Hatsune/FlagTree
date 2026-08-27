@@ -23,12 +23,6 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#if __has_include("flagtree_spec.h")
-#include "flagtree_spec.h"
-#endif
-
-#ifndef FLAGTREE_SPEC_Dialect_TritonGPU_Transforms_RemoveLayoutConversion
-
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -51,6 +45,7 @@
 #endif // __FLAGTREE_RLC_ENHANCE__
 #include "triton/Analysis/Utility.h"
 #ifdef __TLE__
+#include "tle/dialect/include/IR/Dialect.h"
 #include "tle/dialect/include/Transforms/TransformAttrs.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #endif // __TLE__
@@ -205,8 +200,25 @@ public:
   // Structure to keep track of the layout associated to a value.
   struct LayoutInfo {
     LayoutInfo(Attribute encoding) { encodings.insert(encoding); }
+#ifdef __TLE__
+    LayoutInfo(Attribute encoding, bool hard) { add(encoding, hard); }
+#endif
     LayoutInfo() {}
+    void add(Attribute encoding) { encodings.insert(encoding); }
+#ifdef __TLE__
+    void add(Attribute encoding, bool hard) {
+      encodings.insert(encoding);
+      if (hard)
+        hardEncodings.insert(encoding);
+    }
+    bool isHard(Attribute encoding) const {
+      return hardEncodings.contains(encoding);
+    }
+#endif
     llvm::SmallSetVector<Attribute, 8> encodings;
+#ifdef __TLE__
+    llvm::SmallSetVector<Attribute, 8> hardEncodings;
+#endif
   };
 #ifdef __FLAGTREE_RLC_ENHANCE__
   LayoutPropagation(FuncOp F, bool costBased = true, bool backwardProp = true,
@@ -443,6 +455,12 @@ static int64_t getByteCount(Value result, int64_t minElementCount,
 // Return true if the op is an op with a layout we don't want to change. We will
 // propagate the layout starting from anchor ops.
 bool isLayoutAnchor(Operation *op) {
+#ifdef __TLE__
+  if (isa<triton::tle::ExtractTileOp, triton::tle::InsertTileOp>(op))
+    return true;
+  if (isTleExplicitConvertLayoutOp(op))
+    return true;
+#endif
   if (isa<DescriptorOpInterface>(op))
     return true;
   if (isa<LoadOp, StoreOp>(op))
@@ -472,8 +490,17 @@ bool LayoutPropagation::hasLayoutPropagationExtensions() const {
 #endif // __FLAGTREE_RLC_ENHANCE__
 
 void LayoutPropagation::initAnchorLayout() {
-  auto addAnchor = [&](Value v) {
+
+  auto addAnchor = [&](Value v, Attribute encoding = nullptr,
+                       bool hard = false) {
     if (auto tensorType = dyn_cast<RankedTensorType>(v.getType())) {
+      Attribute anchorEncoding = encoding ? encoding : tensorType.getEncoding();
+      auto &info = layouts[v];
+#ifdef __TLE__
+      info.add(anchorEncoding, hard);
+#else
+      info.add(anchorEncoding);
+#endif
 #ifdef __FLAGTREE_RLC_ENHANCE__
       if (!hasLayoutPropagationExtensions() || tensorType.getEncoding())
         layouts.insert({v, LayoutInfo(tensorType.getEncoding())});
@@ -493,7 +520,15 @@ void LayoutPropagation::initAnchorLayout() {
   funcOp.walk([&](Operation *op) {
     if (isLayoutAnchor(op)) {
       for (auto result : op->getResults()) {
+#ifdef __TLE__
+        bool hard = isTleExplicitConvertLayoutOp(op);
+        Attribute explicitEncoding =
+            hard ? getTleExplicitResultEncoding(op, result.getResultNumber())
+                 : nullptr;
+        addAnchor(result, explicitEncoding, hard);
+#else
         addAnchor(result);
+#endif
       }
     }
   });
@@ -515,8 +550,14 @@ void LayoutPropagation::setEncoding(ValueRange values, LayoutInfo &info,
       } else {
         dstEncoding = inferDstEncoding(op, encoding);
       }
-      if (dstEncoding)
-        hasChanged |= layouts[value].encodings.insert(dstEncoding);
+      if (dstEncoding) {
+        auto &layoutInfo = layouts[value];
+        hasChanged |= layoutInfo.encodings.insert(dstEncoding);
+#ifdef __TLE__
+        if (info.isHard(encoding))
+          hasChanged |= layoutInfo.hardEncodings.insert(dstEncoding);
+#endif
+      }
     }
     if (hasChanged)
       changed.push_back(value);
@@ -2688,11 +2729,21 @@ void LayoutPropagation::resolveConflicts() {
     }
     info.encodings.clear();
     info.encodings.insert(bestEncoding);
-#else  // __FLAGTREE_RLC_ENHANCE__
+#else // __FLAGTREE_RLC_ENHANCE__
     Operation *op = it.first.getDefiningOp();
     LayoutInfo &info = it.second;
     if (info.encodings.size() <= 1)
       continue;
+#ifdef __TLE__
+    if (!info.hardEncodings.empty()) {
+      Attribute encoding = *info.hardEncodings.begin();
+      info.encodings.clear();
+      info.encodings.insert(encoding);
+      info.hardEncodings.clear();
+      info.hardEncodings.insert(encoding);
+      continue;
+    }
+#endif
     // Hacky resolve, prefer block encoding.
     // TODO: add a proper heuristic.
     Attribute encoding = *info.encodings.begin();
@@ -2720,6 +2771,10 @@ void LayoutPropagation::dump() {
     llvm::errs() << " \n encoding:\n";
     for (auto encoding : it.second.encodings) {
       encoding.print(llvm::errs());
+#ifdef __TLE__
+      if (it.second.hardEncodings.contains(encoding))
+        llvm::errs() << " [hard]";
+#endif
       llvm::errs() << "\n";
     }
     llvm::errs() << "--\n";
@@ -3152,6 +3207,10 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
 #endif // __FLAGTREE_RLC_ENHANCE__
     auto newType = tensorType.cloneWithEncoding(encoding);
     auto cvt = ConvertLayoutOp::create(rewriter, op->getLoc(), newType, src);
+#ifdef __TLE__
+    if (Attribute explicitEncoding = getTleExplicitResultEncoding(op, 0))
+      cvt->setAttr(getTleExplicitEncodingAttrName(0), explicitEncoding);
+#endif
     map(op->getResult(0), cvt.getResult());
     return cvt.getOperation();
   }
@@ -4139,10 +4198,19 @@ void LayoutRematerialization::hoistConvertDotOperand(
   // We hoist over any operation that can be done without data movement between
   // threads We do views and elementwise pure ops for now
   auto noDataMovement = [](Operation *op) {
+#ifdef __FLAGTREE_CONCAT_DOT_OPERAND__
+    // ConcatDotOperandOp grows the tensor along K but keeps every element on
+    // the thread that already held it, so hoisting a convert over it is free.
+    return (op->hasTrait<OpTrait::Elementwise>() && isMemoryEffectFree(op)) ||
+           isa<BroadcastOp, Fp4ToFpOp, ConvertLayoutOp, UpcastFpOpInterface,
+               ConcatDotOperandOp>(op) ||
+           isView(op);
+#else  // __FLAGTREE_CONCAT_DOT_OPERAND__
     return (op->hasTrait<OpTrait::Elementwise>() && isMemoryEffectFree(op)) ||
            isa<BroadcastOp, Fp4ToFpOp, ConvertLayoutOp, UpcastFpOpInterface>(
                op) ||
            isView(op);
+#endif // __FLAGTREE_CONCAT_DOT_OPERAND__
   };
   // Stop the slice as soon as we find an operation that cannot be done without
   // data movement between threads
@@ -4785,5 +4853,3 @@ createTritonGPURemoveLayoutConversionsEnhanced(bool enhance) {
 #endif // __FLAGTREE_RLC_ENHANCE__
 
 } // namespace mlir::triton::gpu
-
-#endif

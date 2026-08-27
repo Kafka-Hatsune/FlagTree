@@ -29,7 +29,7 @@ from ..backends.compiler import Language
 from ..backends.compiler import BaseBackend, GPUTarget
 from .. import __version__, knobs
 from ..runtime.autotuner import OutOfResources
-from ..runtime.cache import get_cache_manager, get_dump_manager, get_override_manager, get_cache_key
+from ..runtime.cache import get_cache_manager, get_dump_manager, get_override_manager, get_cache_key, triton_key as triton_key
 from ..runtime.driver import driver
 from ..tools.disasm import get_sass
 from pathlib import Path
@@ -421,6 +421,11 @@ def _raise_error(err, *args, **kwargs):
 
 class CompiledKernel:
 
+    # flagtree: compatibility for Torch Inductor versions that still read launch hooks
+    # from CompiledKernel. Triton 3.7 owns these hooks under knobs.runtime.
+    launch_enter_hook = knobs.runtime.launch_enter_hook
+    launch_exit_hook = knobs.runtime.launch_exit_hook
+
     def __init__(self, src, metadata_group, hash):
         from collections import namedtuple
         metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
@@ -429,7 +434,11 @@ class CompiledKernel:
         target = metadata['target']
         metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
         # Restore tuple-typed metadata fields serialized as JSON arrays.
-        cluster_dims = metadata.get("cluster_dims")
+        # Backends that do not support cluster launches (e.g. hcu, mthreads)
+        # omit cluster_dims entirely; torch._inductor reads it unconditionally
+        # when the kernel carries metadata, so default it here rather than
+        # letting every such backend patch torch/inductor in its own adapter.
+        cluster_dims = metadata.setdefault("cluster_dims", (1, 1, 1))
         if isinstance(cluster_dims, list):
             metadata["cluster_dims"] = tuple(cluster_dims)
         KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))

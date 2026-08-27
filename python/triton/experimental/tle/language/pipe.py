@@ -19,9 +19,18 @@
 # SOFTWARE.
 
 # flagtree tle
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import triton.language.core as tl
 
 from .gpu import types as gpu_types
+from .gpu.mthreads import common as mthreads_common
+from .gpu.mthreads import pipe as mthreads_pipe
+
+if TYPE_CHECKING:
+    from . import TLESemantic
 
 
 def _unwrap_pipe_constexpr(value):
@@ -76,7 +85,7 @@ def pipe(
     name=None,
     readers=None,
     one_shot=False,
-    _semantic=None,
+    _semantic: TLESemantic | None = None,
     **fields,
 ) -> gpu_types.pipe_value:
     """
@@ -109,6 +118,9 @@ def pipe(
         raise ValueError(f"tle.pipe one_shot must be a compile-time bool, got {type(one_shot).__name__}")
     if not fields:
         raise ValueError("tle.pipe requires at least one payload field")
+
+    if mthreads_common.enabled() and mthreads_pipe.is_backend_builder(_semantic.builder):
+        mthreads_pipe.validate_pipe_options(scope, reader_names, one_shot, fields)
 
     for field_name, field in fields.items():
         _validate_public_name("field", field_name)
