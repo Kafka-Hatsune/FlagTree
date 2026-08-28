@@ -46,3 +46,32 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#mma = #ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [4, 1], instrShape = [16, 128, 16]}>
+#shared_a = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16}>
+#shared_b = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = true, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+  // NVGPU-LABEL: @split_active_n_for_tiled_rows
+  // NVGPU-COUNT-5: nvg.wgmma
+  // NVGPU-SAME: n = 16 : i32
+  // LLVM-LABEL: @split_active_n_for_tiled_rows
+  // LLVM-NOT: wgmma.mma_async.sync.aligned.m64n80k16
+  // LLVM-COUNT-5: wgmma.mma_async.sync.aligned.m64n16k16
+  tt.func @split_active_n_for_tiled_rows(
+      %a: !ttg.memdesc<64x256xf16, #shared_a, #smem>,
+      %b: !ttg.memdesc<256x128xf16, #shared_b, #smem>,
+      %acc: tensor<64x128xf32, #mma>) {
+    %m = ttng.warp_group_dot %a, %b, %acc {
+      inputPrecision = 0 : i32,
+      tle.tiled_smem_logical_cols = 256 : i32,
+      tle.tiled_smem_logical_rows = 80 : i32,
+      tle.tiled_smem_operand_b,
+      tle.tiled_smem_storage_tile_shape = array<i32: 16, 256>,
+      tle.wgmma_active_n = 80 : i32
+    } : !ttg.memdesc<64x256xf16, #shared_a, #smem> * !ttg.memdesc<256x128xf16, #shared_b, #smem> -> tensor<64x128xf32, #mma>
+    tt.return
+  }
+}

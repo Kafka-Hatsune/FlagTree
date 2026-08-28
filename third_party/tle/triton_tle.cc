@@ -41,6 +41,7 @@
 #include "pybind11/pytypes.h"
 #include "pybind11/stl.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/IR/VerifyUtils.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"

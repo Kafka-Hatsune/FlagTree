@@ -8,6 +8,7 @@
 
 #include "mlir/IR/BuiltinOps.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -67,12 +68,19 @@ struct LogicalMemDescUseAction {
   bool markTiledPipeField = false;
 };
 
+struct LogicalPointerCopyAction {
+  LocalPointersOp pointers;
+  triton::StoreOp store;
+  triton::LoadOp load;
+};
+
 struct LogicalRootRewriteAction {
   gpu::LocalAllocOp alloc;
   LogicalShape logicalShape;
   SmallVector<int64_t, 2> storageTileShape;
   SmallVector<gpu::MemDescIndexOp> stages;
   SmallVector<gpu::TMACopyOp> copies;
+  SmallVector<LogicalPointerCopyAction> pointerCopies;
   SmallVector<LogicalMemDescUseAction> memdescUses;
   bool reachesWGMMA = false;
 };
