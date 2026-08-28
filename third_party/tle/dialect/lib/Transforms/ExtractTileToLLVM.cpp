@@ -51,36 +51,6 @@ static SmallVector<int64_t> getTileShape(ExtractTileOp op) {
   return ts;
 }
 
-static std::optional<int64_t> getStaticIndex(ExtractTileOp op) {
-  if (auto c = op->getOperand(1).getDefiningOp<mlir::arith::ConstantOp>())
-    return mlir::cast<mlir::IntegerAttr>(c.getValue()).getInt();
-  return std::nullopt;
-}
-
-static bool isCTATileAligned(ExtractTileOp op, int64_t linearIndex) {
-  auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
-  auto srcShape = srcTy.getShape();
-  auto tileShape = getTileShape(op);
-  auto ctaTile = getShapePerCTATile(srcTy);
-  int rank = srcShape.size();
-  SmallVector<int64_t> logicalGrid(rank), tileCoords(rank);
-  for (int i = 0; i < rank; ++i)
-    logicalGrid[i] = srcShape[i] / tileShape[i];
-  int64_t remain = linearIndex;
-  for (int i = rank - 1; i >= 0; --i) {
-    tileCoords[i] = remain % logicalGrid[i];
-    remain /= logicalGrid[i];
-  }
-  for (int i = 0; i < rank; ++i) {
-    int64_t off = tileCoords[i] * tileShape[i];
-    if (tileShape[i] % (int64_t)ctaTile[i] != 0)
-      return false;
-    if (off % (int64_t)ctaTile[i] != 0)
-      return false;
-  }
-  return true;
-}
-
 // ============================================================================
 // Path 1: Static register permutation (unchanged)
 // ============================================================================
@@ -407,8 +377,9 @@ struct ExtractTileOpConversion : public ConvertOpToLLVMPattern<ExtractTileOp> {
     if (!isa<ttg::BlockedEncodingAttr>(srcTy.getEncoding()))
       return op.emitError("extract_tile only supports BlockedEncodingAttr");
 
-    auto staticIndex = getStaticIndex(op);
-    if (staticIndex.has_value() && isCTATileAligned(op, staticIndex.value()))
+    auto staticIndex = getStaticExtractTileIndex(op);
+    if (staticIndex.has_value() &&
+        isExtractTileCTAAligned(op, staticIndex.value()))
       return lowerExtractTileStatic(
           op, adaptor, rewriter, this->getTypeConverter(), staticIndex.value());
     return lowerExtractTileViaSMEM(op, adaptor, rewriter,

@@ -28,7 +28,6 @@ constexpr llvm::StringLiteral kLogicalAllocShape("tle.logical_alloc_shape");
 constexpr llvm::StringLiteral kLogicalNonPowerAxis(
     "tle.logical_non_power_axis");
 constexpr llvm::StringLiteral kStoragePlan("tle.storage_plan");
-constexpr llvm::StringLiteral kLogicalCopyShape("tle.logical_copy_shape");
 
 static RankedTensorType getTensorType(Value value) {
   return dyn_cast<RankedTensorType>(value.getType());
@@ -267,6 +266,8 @@ public:
                                     LogicalDomainPhase phase);
   LogicalResult processLogicalTMACopy(Operation *op,
                                       LogicalDomainPhase phase);
+  LogicalResult processLogicalPointerCopy(Operation *op,
+                                          LogicalDomainPhase phase);
   LogicalResult processWarpSpecialize(Operation *op,
                                       LogicalDomainPhase phase);
   LogicalResult processPipe(Operation *op, LogicalDomainPhase phase);
@@ -304,6 +305,7 @@ enum class LogicalBehavior : uint8_t {
   CandidateAlloc,
   MemDescIndex,
   LogicalTMACopy,
+  LogicalPointerCopy,
   WarpSpecialize,
   Pipe,
   MemDescUse,
@@ -340,6 +342,8 @@ static LogicalResult dispatchLogicalBehavior(LogicalDomainContext &context,
     return context.processMemDescIndex(op, phase);
   case LogicalBehavior::LogicalTMACopy:
     return context.processLogicalTMACopy(op, phase);
+  case LogicalBehavior::LogicalPointerCopy:
+    return context.processLogicalPointerCopy(op, phase);
   case LogicalBehavior::WarpSpecialize:
     return context.processWarpSpecialize(op, phase);
   case LogicalBehavior::Pipe:
@@ -1205,7 +1209,8 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       diag << storageTile << ", got " << blockShape.take_back(2);
       return failure();
     }
-    auto logical = copy->getAttrOfType<DenseI64ArrayAttr>(kLogicalCopyShape);
+    auto logical =
+        copy->getAttrOfType<DenseI64ArrayAttr>(kLogicalCopyShapeAttr);
     if (!logical || logical.size() != blockShape.size() ||
         llvm::any_of(logical.asArrayRef().drop_back(2),
                      [](int64_t extent) { return extent != 1; }) ||
@@ -1232,6 +1237,90 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
         root->copies.push_back(copy);
     }
   }
+  return success();
+}
+
+LogicalResult
+LogicalDomainContext::processLogicalPointerCopy(Operation *operation,
+                                                LogicalDomainPhase phase) {
+  auto pointers = cast<LocalPointersOp>(operation);
+  const MemDescLogicalState *state = lookupMemDesc(pointers.getSrc());
+  if (!state)
+    return success();
+  if (phase == LogicalDomainPhase::Propagate)
+    return success();
+
+  auto srcType = dyn_cast<ttg::MemDescType>(pointers.getSrc().getType());
+  auto ptrType = dyn_cast<RankedTensorType>(pointers.getResult().getType());
+  if (!state->isStage || state->transposed ||
+      !pointers.getSrc().getDefiningOp<ttg::MemDescIndexOp>() || !srcType ||
+      !ptrType || state->logicalShape.size() != 2 || srcType.getRank() != 2)
+    return emitError(
+        pointers, 0,
+        "logical pointer copy requires a direct rank-2 stage destination");
+
+  auto logical =
+      pointers->getAttrOfType<DenseI64ArrayAttr>(kLogicalCopyShapeAttr);
+  if (!logical ||
+      logical.asArrayRef() != ArrayRef<int64_t>(state->logicalShape))
+    return emitError(
+        pointers, 0,
+        "logical pointer copy shape must match the logical stage shape");
+  if (ptrType.getShape() != srcType.getShape() ||
+      ptrType.getShape() != ArrayRef<int64_t>(state->physicalShape) ||
+      pointers.getIndices().size() != 2)
+    return emitError(
+        pointers, 0,
+        "logical pointer copy must address the complete padded stage carrier");
+  for (Value index : pointers.getIndices()) {
+    auto indexType = dyn_cast<RankedTensorType>(index.getType());
+    if (!indexType || indexType.getShape() != ptrType.getShape())
+      return emitError(
+          pointers, 0,
+          "logical pointer copy indices must cover the padded stage carrier");
+  }
+
+  if (!pointers.getResult().hasOneUse())
+    return emitError(
+        pointers, 0,
+        "logical pointer copy local pointers must feed exactly one store");
+  auto store =
+      dyn_cast<triton::StoreOp>(*pointers.getResult().getUsers().begin());
+  if (!store || store.getPtr() != pointers.getResult() || store.getMask() ||
+      !store.getBoundaryCheck().empty())
+    return emitError(
+        pointers, 0,
+        "logical pointer copy requires one unmasked full-carrier store");
+
+  auto load = store.getValue().getDefiningOp<triton::LoadOp>();
+  auto loadType = dyn_cast<RankedTensorType>(store.getValue().getType());
+  if (!load || !load->hasOneUse() || load.getIsVolatile() ||
+      !load.getBoundaryCheck().empty() || load.getPadding() || !loadType ||
+      !isGlobalPointerTensor(load.getPtr()) ||
+      loadType.getShape() != ptrType.getShape() ||
+      loadType.getElementType() != srcType.getElementType())
+    return emitError(
+        pointers, 0,
+        "logical pointer copy requires a direct non-volatile global load "
+        "whose carrier shape and element type match the stage");
+
+  FailureOr<SmallVector<int64_t, 2>> selectedStorageTile =
+      selectLogicalSMEMStorageTileShape(srcType, state->logicalShape);
+  if (failed(selectedStorageTile))
+    return emitError(
+        pointers, 0,
+        "logical stage has no exact power-of-two storage tile of at least 16 "
+        "along its fragment axis");
+
+  auto *root = findRootAction(plan, state->provenance.primaryRoot());
+  if (!root)
+    return emitError(pointers, 0, "candidate root has no storage action");
+  if (failed(selectRootStorageTile(*root, *selectedStorageTile, pointers)))
+    return failure();
+  if (llvm::none_of(root->pointerCopies, [&](const auto &action) {
+        return action.pointers == pointers;
+      }))
+    root->pointerCopies.push_back({pointers, store, load});
   return success();
 }
 
@@ -1834,14 +1923,18 @@ getExplicitLogicalBehavior(Operation *op) {
           [](auto) { return LogicalBehavior::MemDescIndex; })
       .Case<ttg::TMACopyOp>(
           [](auto) { return LogicalBehavior::LogicalTMACopy; })
+      .Case<LocalPointersOp>([](LocalPointersOp op) {
+        return op->hasAttr(kLogicalCopyShapeAttr)
+                   ? LogicalBehavior::LogicalPointerCopy
+                   : LogicalBehavior::RejectEscape;
+      })
       .Case<ttg::WarpSpecializeOp>(
           [](auto) { return LogicalBehavior::WarpSpecialize; })
       .Case<MemDescWGMMAViewOp>(
           [](auto) { return LogicalBehavior::MemDescTranspose; })
       .Case<WGMMAOp>([](auto) { return LogicalBehavior::WGMMA; })
       .Case<WGMMAWaitOp>([](auto) { return LogicalBehavior::WGMMAWait; })
-      .Case<ExclusiveCumsumOp>(
-          [](auto) { return LogicalBehavior::RejectScan; })
+      .Case<ExclusiveCumsumOp>([](auto) { return LogicalBehavior::RejectScan; })
       .Case<PipeCreateOp, PipeWriterAcquireOp, PipeWriterCommitOp,
             PipeWriterCloseOp, PipeReaderWaitOp, PipeReaderReleaseOp>(
           [](auto) { return LogicalBehavior::Pipe; })
@@ -1851,10 +1944,8 @@ getExplicitLogicalBehavior(Operation *op) {
           [](auto) { return LogicalBehavior::ExpandDims; })
       .Case<triton::BroadcastOp>(
           [](auto) { return LogicalBehavior::Broadcast; })
-      .Case<triton::TransOp>(
-          [](auto) { return LogicalBehavior::Transpose; })
-      .Case<triton::ReshapeOp>(
-          [](auto) { return LogicalBehavior::Reshape; })
+      .Case<triton::TransOp>([](auto) { return LogicalBehavior::Transpose; })
+      .Case<triton::ReshapeOp>([](auto) { return LogicalBehavior::Reshape; })
       .Case<triton::CatOp>([](auto) { return LogicalBehavior::Cat; })
       .Case<triton::JoinOp>([](auto) { return LogicalBehavior::Join; })
       .Case<triton::SplitOp>([](auto) { return LogicalBehavior::Split; })
@@ -1871,10 +1962,8 @@ getExplicitLogicalBehavior(Operation *op) {
           [](auto) { return LogicalBehavior::RejectHistogram; })
       .Case<triton::AtomicCASOp>(
           [](auto) { return LogicalBehavior::RejectAtomicCAS; })
-      .Case<triton::LoadOp>(
-          [](auto) { return LogicalBehavior::RejectLoad; })
-      .Case<LocalPointersOp, ExtractTileOp, InsertTileOp, triton::CallOp,
-            triton::ReturnOp>(
+      .Case<triton::LoadOp>([](auto) { return LogicalBehavior::RejectLoad; })
+      .Case<ExtractTileOp, InsertTileOp, triton::CallOp, triton::ReturnOp>(
           [](auto) { return LogicalBehavior::RejectEscape; })
       .Default([](Operation *) -> std::optional<LogicalBehavior> {
         return std::nullopt;
@@ -2101,7 +2190,8 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
       root.alloc->emitOpError("logical domain has no stage views");
       return failure();
     }
-    if (root.copies.empty() || !root.reachesWGMMA) {
+    if ((root.copies.empty() && root.pointerCopies.empty()) ||
+        !root.reachesWGMMA) {
       root.alloc->emitOpError(
           "logical domain must reach both an exact producer and WGMMA");
       return failure();

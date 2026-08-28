@@ -63,6 +63,59 @@ void ExtractTileOp::build(OpBuilder &builder, OperationState &state, Value src,
   state.addTypes(resultType);
 }
 
+std::optional<int64_t> getStaticExtractTileIndex(ExtractTileOp op) {
+  auto indexConstOp = op.getIndex().getDefiningOp<arith::ConstantOp>();
+  if (!indexConstOp)
+    return std::nullopt;
+  return cast<IntegerAttr>(indexConstOp.getValue()).getInt();
+}
+
+bool isExtractTileCTAAligned(ExtractTileOp op, int64_t linearIndex) {
+  auto srcTy = dyn_cast<RankedTensorType>(op.getSrc().getType());
+  if (!srcTy)
+    return false;
+  auto blocked = dyn_cast_or_null<triton::gpu::BlockedEncodingAttr>(
+      srcTy.getEncoding());
+  auto tileShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>("tile_shape");
+  if (!blocked || !tileShapeAttr)
+    return false;
+
+  auto srcShape = srcTy.getShape();
+  auto tileShape = tileShapeAttr.asArrayRef();
+  if (srcShape.size() != tileShape.size())
+    return false;
+
+  auto sizePerThread = blocked.getSizePerThread();
+  auto threadsPerWarp = blocked.getThreadsPerWarp();
+  auto warpsPerCTA = blocked.getWarpsPerCTA();
+  SmallVector<int64_t> logicalGrid(srcShape.size());
+  SmallVector<int64_t> tileCoords(srcShape.size());
+  for (size_t i = 0; i < srcShape.size(); ++i) {
+    if (tileShape[i] <= 0 || srcShape[i] % tileShape[i] != 0)
+      return false;
+    logicalGrid[i] = srcShape[i] / tileShape[i];
+  }
+
+  int64_t remain = linearIndex;
+  for (int i = static_cast<int>(srcShape.size()) - 1; i >= 0; --i) {
+    tileCoords[i] = remain % logicalGrid[i];
+    remain /= logicalGrid[i];
+  }
+  if (remain != 0 || linearIndex < 0)
+    return false;
+
+  for (size_t i = 0; i < srcShape.size(); ++i) {
+    int64_t ctaTile = static_cast<int64_t>(sizePerThread[i]) *
+                      static_cast<int64_t>(threadsPerWarp[i]) *
+                      static_cast<int64_t>(warpsPerCTA[i]);
+    int64_t offset = tileCoords[i] * tileShape[i];
+    if (ctaTile <= 0 || tileShape[i] % ctaTile != 0 ||
+        offset % ctaTile != 0)
+      return false;
+  }
+  return true;
+}
+
 // ============================================================================
 // ExtractTileOp Verification
 //

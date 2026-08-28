@@ -1160,6 +1160,33 @@ def copy(
         other=None,
         _semantic=None,
     ) -> None:
+        candidate = dst if direction == CopyDirection.GM_TO_LOCAL else src
+        logical_pointer_copy = isinstance(candidate, tle.logical_smem_stage)
+        if logical_pointer_copy:
+            if mthreads_enabled or iluvatar_enabled:
+                raise ValueError(
+                    "logical candidate SMEM pointer copy is supported only "
+                    "by the NVIDIA TLE backend"
+                )
+            if direction != CopyDirection.GM_TO_LOCAL:
+                raise ValueError(
+                    "logical candidate SMEM pointer copy currently supports "
+                    "only global-to-SMEM"
+                )
+            logical_shape = [int(dim) for dim in candidate.logical_shape]
+            copy_shape = [int(tl._unwrap_if_constexpr(dim)) for dim in shape]
+            if copy_shape != logical_shape:
+                raise ValueError(
+                    "logical candidate SMEM pointer copy shape must match "
+                    f"the logical stage shape {logical_shape}, got {copy_shape}"
+                )
+            if list(src.shape) != list(candidate.shape):
+                raise ValueError(
+                    "logical candidate SMEM pointer copy requires a padded "
+                    f"carrier pointer tensor of shape {list(candidate.shape)}, "
+                    f"got {list(src.shape)}"
+                )
+
         if mthreads_enabled:
             mthreads_copy.validate_normal_copy(src, dst, shape, direction)
 
@@ -1204,6 +1231,10 @@ def copy(
                 # represented by the loaded ``other`` value rather than by
                 # suppressing the shared-memory store.
                 _semantic.store(local_ptrs, tt_load, None, boundary_check, cache_modifier, eviction_policy)
+                if logical_pointer_copy:
+                    _semantic.builder.mark_logical_pointer_copy(
+                        local_ptrs.handle, logical_shape
+                    )
             else:
                 if other is not None:
                     raise ValueError("copy other is only supported for global-to-local copies")
@@ -1380,11 +1411,11 @@ def copy(
     tiled_copy = isinstance(src, exact_stage_types) or isinstance(dst, exact_stage_types)
     if tiled_copy:
         if is_normcopy:
-            raise ValueError(
-                "exact tiled SMEM copy requires a tensor descriptor: "
-                "a pointer tensor does not carry the strides needed to derive "
-                "all storage-tile addresses"
-            )
+            if barrier is not None:
+                raise ValueError(
+                    "copy barrier is only supported for TMA global-to-shared copy"
+                )
+            return normcopy(src, dst, shape, direction, mask, other, _semantic)
         if mask is not None or other is not None:
             raise ValueError(
                 "tensor-descriptor tiled SMEM copy does not accept mask or other"

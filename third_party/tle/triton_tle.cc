@@ -41,6 +41,7 @@
 #include "pybind11/pytypes.h"
 #include "pybind11/stl.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -267,8 +268,7 @@ void init_triton_tle_ir(py::module &&m) {
           })
       .def("create_logical_tma_copy",
            [](TritonOpBuilder &self, Value src, Value dst,
-              std::vector<Value> &indices,
-              std::vector<int64_t> logicalShape) {
+              std::vector<Value> &indices, std::vector<int64_t> logicalShape) {
 #ifdef __HCU__
              auto op = self.create<ttg::TMACopyOp>(src, dst, indices);
 #else
@@ -331,6 +331,16 @@ void init_triton_tle_ir(py::module &&m) {
              }
              return self.create<tle::LocalPointersOp>(resultTy, memDesc,
                                                       indices);
+           })
+      .def("mark_logical_pointer_copy",
+           [](TritonOpBuilder &self, Value value,
+              std::vector<int64_t> logicalShape) {
+             auto op = value.getDefiningOp<tle::LocalPointersOp>();
+             if (!op)
+               throw py::value_error(
+                   "logical pointer copy marker requires tle.local_pointers");
+             op->setAttr(tle::kLogicalCopyShapeAttr,
+                         self.getBuilder().getDenseI64ArrayAttr(logicalShape));
            })
       .def("create_memdesc_index",
            [](TritonOpBuilder &self, Type resultType, Value src,

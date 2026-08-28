@@ -286,7 +286,12 @@ class CUDABackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         # Plan padded non-power-of-two TLE allocs only after the complete TTIR
-        # def-use graph is visible, and before TTGPU layout selection.
+        # def-use graph is visible, and before TTGPU layout selection.  Publish
+        # the launch warp count early so the logical pointer-copy planner can
+        # size a copy wave for both the default and worker partitions.
+        mod.set_attr(
+            "ttg.num-warps", ir.builder(mod.context).get_int32_attr(opt.num_warps)
+        )
         tle.passes.add_plan_logical_domains(pm)
         pm.run(mod, 'make_ttir')
         return mod

@@ -27,6 +27,8 @@ inline constexpr llvm::StringLiteral
     kExactSMEMTileSpanAttr("tle.exact_smem_tile_span");
 inline constexpr llvm::StringLiteral
     kLogicalTMACopyBytesAttr("tle.logical_tma_copy_bytes");
+inline constexpr llvm::StringLiteral
+    kLogicalCopyShapeAttr("tle.logical_copy_shape");
 
 inline constexpr int64_t kExactSMEMFragmentQuantum = 16;
 

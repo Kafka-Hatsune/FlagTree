@@ -23,6 +23,72 @@ void applyLogicalTensorActions(LogicalDomainPlan &plan);
 
 namespace {
 constexpr llvm::StringLiteral kTiledFields("tiled_smem_fields");
+constexpr int64_t kHopperThreadsPerWarp = 32;
+constexpr int64_t kCpAsyncMaxTransactionBytes = 16;
+constexpr int64_t kNVMMACoreRows = 8;
+
+static SmallVector<int64_t, 2> selectLogicalPointerCopyMicroTile(
+    Operation *copy, ArrayRef<int64_t> storageTileShape,
+    ttg::NVMMASharedEncodingAttr storageEncoding, Type elementType) {
+  assert(storageTileShape.size() == 2 &&
+         "logical pointer-copy storage tile must be rank two");
+  assert(elementType.isIntOrFloat() &&
+         "exact-SMEM element type must have a bit width");
+
+  // Size one copy wave for the participating producer threads.  The later
+  // async-copy legality pass still selects 4/8/16-byte transactions from
+  // AxisInfo; this is only the rectangular work partition presented to it.
+  int64_t numWarps = ttg::maybeLookupNumWarps(copy).value_or(4);
+  int64_t elementBits = elementType.getIntOrFloatBitWidth();
+  int64_t targetElements =
+      numWarps * kHopperThreadsPerWarp * kCpAsyncMaxTransactionBytes * 8 /
+      elementBits;
+
+  unsigned contiguousAxis = storageEncoding.getTransposed() ? 0u : 1u;
+  unsigned outerAxis = 1u - contiguousAxis;
+  int64_t swizzleBytes =
+      std::max<int64_t>(storageEncoding.getSwizzlingByteWidth(), 16);
+  int64_t swizzleElements = swizzleBytes * 8 / elementBits;
+  int64_t minContiguous =
+      std::min(storageTileShape[contiguousAxis], swizzleElements);
+  int64_t minOuter = std::min(storageTileShape[outerAxis], kNVMMACoreRows);
+
+  // Both storage extents are powers of two, so enumerating their divisors is
+  // cheap.  Maximize useful work within one producer wave while keeping at
+  // least one complete NVMMA core.  For equal areas prefer one swizzle span;
+  // this avoids the larger register layout and code size seen when 16x128 or
+  // 16x256 fp16 copies exceed the useful work of one four-warp wave.
+  SmallVector<int64_t, 2> best{minOuter, minContiguous};
+  if (contiguousAxis == 0)
+    std::swap(best[0], best[1]);
+  int64_t bestElements = best[0] * best[1];
+  bool bestFits = bestElements <= targetElements;
+  for (int64_t rows = 1; rows <= storageTileShape[0]; rows *= 2) {
+    for (int64_t cols = 1; cols <= storageTileShape[1]; cols *= 2) {
+      SmallVector<int64_t, 2> candidate{rows, cols};
+      if (candidate[contiguousAxis] < minContiguous ||
+          candidate[outerAxis] < minOuter)
+        continue;
+      int64_t elements = rows * cols;
+      bool fits = elements <= targetElements;
+      if (fits != bestFits) {
+        if (!fits)
+          continue;
+      } else if (fits && elements < bestElements) {
+        continue;
+      } else if (!fits && elements > bestElements) {
+        continue;
+      }
+      if (fits != bestFits || elements != bestElements ||
+          candidate[contiguousAxis] < best[contiguousAxis]) {
+        best = candidate;
+        bestElements = elements;
+        bestFits = fits;
+      }
+    }
+  }
+  return best;
+}
 
 static void addTiledPipeField(Operation *op, unsigned fieldIndex,
                               OpBuilder &builder) {
@@ -43,6 +109,116 @@ static Value addOffset(OpBuilder &builder, Location loc, Value base,
   Value constant = arith::ConstantIntOp::create(
       builder, loc, delta, intType.getWidth());
   return arith::AddIOp::create(builder, loc, base, constant);
+}
+
+static Value createStaticExtractTile(OpBuilder &builder, Location loc,
+                                     Value value, int64_t linearTile,
+                                     ArrayRef<int64_t> tileShape) {
+  if (!value)
+    return {};
+  Value index = arith::ConstantIntOp::create(builder, loc, builder.getI32Type(),
+                                             linearTile);
+  return ExtractTileOp::create(builder, loc, value, index, tileShape)
+      .getResult();
+}
+
+static Value createFullTileIndex(OpBuilder &builder, Location loc,
+                                 ArrayRef<int64_t> tileShape, unsigned axis,
+                                 int64_t offset) {
+  auto rangeType =
+      RankedTensorType::get({tileShape[axis]}, builder.getI32Type());
+  Value index = triton::MakeRangeOp::create(builder, loc, rangeType, offset,
+                                            offset + tileShape[axis]);
+  SmallVector<int64_t, 2> expandedShape{tileShape[axis]};
+  unsigned expandAxis = axis == 0 ? 1u : 0u;
+  expandedShape.insert(expandedShape.begin() + expandAxis, 1);
+  index = triton::ExpandDimsOp::create(
+      builder, loc, RankedTensorType::get(expandedShape, builder.getI32Type()),
+      index, expandAxis);
+  if (expandedShape != tileShape)
+    index = triton::BroadcastOp::create(
+        builder, loc, RankedTensorType::get(tileShape, builder.getI32Type()),
+        index);
+  return index;
+}
+
+static void applyLogicalPointerCopy(LogicalPointerCopyAction &action,
+                                    ArrayRef<int64_t> storageTileShape,
+                                    int64_t tilesPerStage,
+                                    unsigned fragmentAxis) {
+  LocalPointersOp pointers = action.pointers;
+  triton::StoreOp store = action.store;
+  triton::LoadOp load = action.load;
+  ExactSMEMStage stage = getExactSMEMStage(pointers.getSrc());
+  assert(stage && "validated logical pointer destination must be a stage");
+
+  auto carrierType = cast<RankedTensorType>(load.getPtr().getType());
+  ArrayRef<int64_t> carrierShape = carrierType.getShape();
+  auto storageEncoding = cast<ttg::NVMMASharedEncodingAttr>(
+      stage.atom.getType().getEncoding());
+  SmallVector<int64_t, 2> microTileShape = selectLogicalPointerCopyMicroTile(
+      store, storageTileShape, storageEncoding,
+      stage.atom.getType().getElementType());
+  int64_t storageRowTiles = storageTileShape[0] / microTileShape[0];
+  int64_t storageColTiles = storageTileShape[1] / microTileShape[1];
+  int64_t sourceGridCols = carrierShape[1] / microTileShape[1];
+  auto originalPtrType = cast<RankedTensorType>(pointers.getResult().getType());
+  auto microPtrType =
+      RankedTensorType::get(microTileShape, originalPtrType.getElementType(),
+                            originalPtrType.getEncoding());
+
+  OpBuilder builder(store);
+  Location loc = store.getLoc();
+  for (int64_t fragmentTile = 0; fragmentTile < tilesPerStage; ++fragmentTile) {
+    Value flatIndex =
+        addOffset(builder, loc, stage.atom.getIndex(), fragmentTile);
+    auto storageTile = ttg::MemDescIndexOp::create(
+        builder, loc, stage.atom.getType(), stage.atom.getSrc(), flatIndex);
+    storageTile->setAttr(kExactSMEMTileAttr,
+                         builder.getI32IntegerAttr(fragmentTile));
+
+    for (int64_t storageRowTile = 0; storageRowTile < storageRowTiles;
+         ++storageRowTile) {
+      for (int64_t storageColTile = 0; storageColTile < storageColTiles;
+           ++storageColTile) {
+        int64_t sourceRowTile =
+            fragmentAxis == 0
+                ? fragmentTile * storageRowTiles + storageRowTile
+                : storageRowTile;
+        int64_t sourceColTile =
+            fragmentAxis == 1
+                ? fragmentTile * storageColTiles + storageColTile
+                : storageColTile;
+        int64_t sourceLinearTile =
+            sourceRowTile * sourceGridCols + sourceColTile;
+        Value tiledPtr = createStaticExtractTile(
+            builder, loc, load.getPtr(), sourceLinearTile, microTileShape);
+        Value tiledMask = createStaticExtractTile(
+            builder, loc, load.getMask(), sourceLinearTile, microTileShape);
+        Value tiledOther = createStaticExtractTile(
+            builder, loc, load.getOther(), sourceLinearTile, microTileShape);
+        Value tiledLoad = triton::LoadOp::create(
+            builder, loc, tiledPtr, tiledMask, tiledOther, load.getCache(),
+            load.getEvict(), load.getIsVolatile(), load.getFlagtreeHintsAttr());
+
+        SmallVector<Value, 2> indices;
+        indices.push_back(createFullTileIndex(
+            builder, loc, microTileShape, 0,
+            storageRowTile * microTileShape[0]));
+        indices.push_back(createFullTileIndex(
+            builder, loc, microTileShape, 1,
+            storageColTile * microTileShape[1]));
+        Value tiledPointers = LocalPointersOp::create(
+            builder, loc, microPtrType, storageTile, indices);
+        triton::StoreOp::create(builder, loc, tiledPointers, tiledLoad,
+                                store.getCache(), store.getEvict());
+      }
+    }
+  }
+
+  store.erase();
+  pointers.erase();
+  load.erase();
 }
 
 static void applyRootRewrite(LogicalRootRewriteAction &action) {
@@ -127,6 +303,10 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
     carrier->setAttr(kExactSMEMStageAttr, stageBuilder.getUnitAttr());
     stage.getResult().replaceAllUsesWith(carrier);
   }
+
+  for (LogicalPointerCopyAction &copy : action.pointerCopies)
+    applyLogicalPointerCopy(copy, storageTileShape, tilesPerStage,
+                            fragmentAxis);
 
   for (ttg::TMACopyOp copy : action.copies) {
     OpBuilder copyBuilder(copy);
