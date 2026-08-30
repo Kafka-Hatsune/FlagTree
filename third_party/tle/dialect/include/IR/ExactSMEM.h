@@ -115,18 +115,32 @@ struct ExactSMEMRoot {
   int64_t getStorageTileRows() const { return storageTileRows; }
   int64_t getStorageTileCols() const { return storageTileCols; }
   std::optional<unsigned> getFragmentAxis() const {
-    bool fragmentedRows = storageTileRows != rows;
-    bool fragmentedCols = storageTileCols != cols;
+    bool fragmentedRows = !llvm::isPowerOf2_64(rows);
+    bool fragmentedCols = !llvm::isPowerOf2_64(cols);
     if (fragmentedRows == fragmentedCols)
       return std::nullopt;
     return fragmentedRows ? 0u : 1u;
   }
+  int64_t getRowTiles() const {
+    assert(storageTileRows > 0 && rows % storageTileRows == 0);
+    return rows / storageTileRows;
+  }
+  int64_t getColTiles() const {
+    assert(storageTileCols > 0 && cols % storageTileCols == 0);
+    return cols / storageTileCols;
+  }
   int64_t getTilesPerStage() const {
-    std::optional<unsigned> fragmentAxis = getFragmentAxis();
-    if (!fragmentAxis)
-      return 0;
-    return *fragmentAxis == 0 ? rows / storageTileRows
-                              : cols / storageTileCols;
+    return getRowTiles() * getColTiles();
+  }
+  int64_t getLinearTile(int64_t rowTile, int64_t colTile) const {
+    assert(rowTile >= 0 && rowTile < getRowTiles());
+    assert(colTile >= 0 && colTile < getColTiles());
+    // Put the power-of-two K/N panels outside the fragmented logical axis.
+    // This is the physical order consumed by one native WGMMA descriptor:
+    // for an 80x256 f16 stage the atoms are [K64][N16], not [N16][K256].
+    return *getFragmentAxis() == 0
+               ? colTile * getRowTiles() + rowTile
+               : rowTile * getColTiles() + colTile;
   }
 };
 
@@ -336,10 +350,9 @@ inline LogicalResult verifyExactSMEMRoot(Operation *anchor,
         "expects the exact-SMEM fragment extent to be a multiple of 16");
 
   std::optional<unsigned> storageFragmentAxis = root.getFragmentAxis();
-  if (!storageFragmentAxis ||
-      *storageFragmentAxis != static_cast<unsigned>(fragmentedCols))
+  if (!storageFragmentAxis)
     return anchor->emitOpError(
-        "expects storage tiles to split only the non-power-of-two axis");
+        "expects one logical non-power-of-two exact-SMEM axis");
   int64_t fragmentTileExtent = fragmentedRows ? root.storageTileRows
                                               : root.storageTileCols;
   int64_t fullTileExtent = fragmentedRows ? root.storageTileCols
@@ -348,11 +361,26 @@ inline LogicalResult verifyExactSMEMRoot(Operation *anchor,
   if (fragmentTileExtent < kExactSMEMFragmentQuantum ||
       !llvm::isPowerOf2_64(fragmentTileExtent) ||
       fragmentTileExtent >= fragmentExtent ||
-      fragmentExtent % fragmentTileExtent != 0 ||
-      fullTileExtent != fullExtent || !llvm::isPowerOf2_64(fullTileExtent))
+      fragmentExtent % fragmentTileExtent != 0)
     return anchor->emitOpError(
-        "expects each exact-SMEM storage tile to retain the full power-of-two "
-        "axis and use a power-of-two fragment-axis divisor of at least 16");
+        "expects a power-of-two fragment-axis divisor of at least 16");
+  if (fullTileExtent <= 0 || !llvm::isPowerOf2_64(fullTileExtent) ||
+      fullTileExtent > fullExtent || fullExtent % fullTileExtent != 0)
+    return anchor->emitOpError(
+        "expects the power-of-two axis storage atom to divide its logical "
+        "extent");
+
+  // The panel-major native-WGMMA layout is deliberately narrow: it is the
+  // Hopper 16x64 f16/bf16 shared-memory atom proven by the QK/PV descriptor
+  // contract. Other operand types keep the pre-existing full-axis tile.
+  Type elementType = root.alloc.getType().getElementType();
+  if (fullTileExtent != fullExtent &&
+      (!fragmentedRows || fragmentTileExtent != 16 ||
+       fullTileExtent != 64 ||
+       !isa<Float16Type, BFloat16Type>(elementType)))
+    return anchor->emitOpError(
+        "permits power-of-two-axis paneling only as 16x64 f16/bf16 atoms "
+        "with fragmented rows");
 
   auto type = root.alloc.getType();
   SmallVector<int64_t> expected{root.capacity * root.getTilesPerStage(),

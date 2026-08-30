@@ -125,6 +125,61 @@ static DotOpMmaSmemLoader buildTleTiledSMEMLoader(
       loc, rewriter, layout, elementBitWidth, smemBase, instrShape,
       /*MNdim=*/1, /*mmaVersion=*/3, descriptorMmaType);
 }
+
+static bool usesTlePanelMajorWGMMAAtoms(
+    triton::gpu::MemDescType bTensorTy, int64_t logicalRows,
+    int64_t logicalCols, int64_t storageTileRows,
+    int64_t storageTileCols) {
+  Type elementType = bTensorTy.getElementType();
+  return isa<Float16Type, BFloat16Type>(elementType) &&
+         storageTileRows == 16 && storageTileCols == 64 &&
+         logicalRows % storageTileRows == 0 &&
+         logicalCols % storageTileCols == 0;
+}
+
+// Build the matrix descriptor used by the historical native-N80 path, but on
+// the current exact-SMEM root/view representation. Physical atoms are ordered
+// [K/N64 panel][logical N/K16 fragment]. The descriptor's leading stride then
+// crosses the atom array instead of aliasing the next K64 panel as another N16
+// fragment.
+static DotOpMmaSmemLoader buildTlePanelMajorSMEMLoader(
+    Location loc, RewriterBase &rewriter,
+    triton::gpu::MemDescType bTensorTy, Value smemBase,
+    int64_t logicalRows, int64_t logicalCols, int64_t storageTileRows,
+    int64_t storageTileCols) {
+  assert(usesTlePanelMajorWGMMAAtoms(
+             bTensorTy, logicalRows, logicalCols, storageTileRows,
+             storageTileCols) &&
+         "panel-major descriptor requires 16x64 f16/bf16 atoms");
+  auto nvmma = cast<triton::gpu::NVMMASharedEncodingAttr>(
+      bTensorTy.getEncoding());
+  bool transposed = nvmma.getTransposed();
+  int64_t elementBytes = bTensorTy.getElementTypeBitWidth() / 8;
+  int64_t atomBytes = storageTileRows * storageTileCols * elementBytes;
+  int64_t rowTiles = logicalRows / storageTileRows;
+
+  SMEMDescriptor smemDescriptor{};
+  smemDescriptor.descriptor = 0;
+  smemDescriptor.leadDimensionBaseOffset =
+      transposed ? 1 : rowTiles * atomBytes / 16;
+  smemDescriptor.strideDimensionBaseOffset = 64;
+  smemDescriptor.swizzlingMode = 1;
+  MMASMEMDescriptor descriptor{/*descriptor=*/smemDescriptor,
+                               /*swizzlingByteWidth=*/128,
+                               /*bitwidth=*/16,
+                               /*transposed=*/transposed,
+                               /*fp4Padded=*/false};
+
+  TritonLLVMOpBuilder b(loc, rewriter);
+  Value sharedByteAddress = b.ptrtoint(rewriter.getI32Type(), smemBase);
+  Value baseSrcb128 = b.lshr(sharedByteAddress, b.i32_val(4));
+  Value baseb128 =
+      b.zext(rewriter.getI64Type(), b.and_(baseSrcb128, b.i32_val(0x3FFF)));
+  return DotOpMmaSmemLoader(
+      descriptor, baseb128,
+      getTleTiledSMEMLoaderLayout(bTensorTy, logicalRows, logicalCols,
+                                  storageTileRows, storageTileCols));
+}
 #endif
 
 triton::nvgpu::WGMMAEltType getMmaRetType(Value d) {
@@ -413,6 +468,7 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   }
   DotOpMmaSmemLoader bLoader;
   bool tiledSMEMTransposed = false;
+  bool panelMajorTiledSMEM = false;
   unsigned tiledSMEMTileK = 0;
   unsigned tiledSMEMTileN = 0;
   if (tiledSMEMOperandB) {
@@ -433,12 +489,26 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
       return op->emitOpError(
           "active-K tiled SMEM requires storage tiles containing complete "
           "WGMMA K instructions");
-    unsigned instructionN = activeNAttr ? tiledSMEMTileN : physicalN;
-    bLoader = buildTleTiledSMEMLoader(
-        loc, rewriter, bTensorTy, baseB,
-        tiledSMEMLogicalRowsAttr.getInt(),
+    panelMajorTiledSMEM = usesTlePanelMajorWGMMAAtoms(
+        bTensorTy, tiledSMEMLogicalRowsAttr.getInt(),
         tiledSMEMLogicalColsAttr.getInt(), tiledSMEMStorageTileRows,
-        tiledSMEMStorageTileCols, {K, instructionN}, dTensorTy);
+        tiledSMEMStorageTileCols);
+    if (panelMajorTiledSMEM) {
+      bLoader = buildTlePanelMajorSMEMLoader(
+          loc, rewriter, bTensorTy, baseB,
+          tiledSMEMLogicalRowsAttr.getInt(),
+          tiledSMEMLogicalColsAttr.getInt(), tiledSMEMStorageTileRows,
+          tiledSMEMStorageTileCols);
+    } else {
+      // The generic layout remains a correctness fallback for exact stages
+      // that do not use the native panel-major 16x64 atom contract.
+      unsigned descriptorN = activeNAttr ? tiledSMEMTileN : physicalN;
+      bLoader = buildTleTiledSMEMLoader(
+          loc, rewriter, bTensorTy, baseB,
+          tiledSMEMLogicalRowsAttr.getInt(),
+          tiledSMEMLogicalColsAttr.getInt(), tiledSMEMStorageTileRows,
+          tiledSMEMStorageTileCols, {K, descriptorN}, dTensorTy);
+    }
   } else {
     bLoader = DotOpMmaSmemLoader::build(
         loc, rewriter, bTensorTy, baseB, {K, physicalN}, 1, 3, false,
@@ -470,10 +540,12 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   triton::nvgpu::WGMMALayout layoutB = transB ? triton::nvgpu::WGMMALayout::row
                                               : triton::nvgpu::WGMMALayout::col;
 
-  bool splitTiledActiveN =
-      tiledSMEMOperandB && activeNAttr && tiledSMEMTileN < N;
-  unsigned wgmmaInstructionN = splitTiledActiveN ? tiledSMEMTileN : N;
-  unsigned activeNFragments = splitTiledActiveN ? N / tiledSMEMTileN : 1;
+  // A panel-major atom array is descriptor-contiguous across active N. Other
+  // exact layouts retain the established per-storage-fragment lowering.
+  unsigned wgmmaInstructionN =
+      activeNAttr && !panelMajorTiledSMEM ? tiledSMEMTileN : N;
+  unsigned activeNFragments =
+      activeNAttr ? N / wgmmaInstructionN : 1;
   unsigned instructionAccSize = 2 * (wgmmaInstructionN / 4);
 
   auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
@@ -558,6 +630,35 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
     int64_t elementBytes = bTensorTy.getElementTypeBitWidth() / 8;
     int64_t tileBytes = tiledSMEMStorageTileRows *
                         tiledSMEMStorageTileCols * elementBytes;
+    if (panelMajorTiledSMEM) {
+      if (n != 0)
+        llvm::report_fatal_error(
+            "panel-major tiled SMEM expects one physical WGMMA N tile");
+      LocalizedSMEMDescriptor desc;
+      int64_t tileOffset = 0;
+      if (tiledSMEMTransposed) {
+        // QK: K advances inside a K64 panel. Each next panel skips all N16
+        // row fragments so one N80 descriptor observes a contiguous N axis.
+        int64_t rowTiles = tiledSMEMLogicalRowsAttr.getInt() /
+                           tiledSMEMStorageTileRows;
+        int localK = k % tiledSMEMTileK;
+        desc = bLoader.localizedSmemLoad(localK, 0);
+        tileOffset = (k / tiledSMEMTileK) * rowTiles;
+      } else {
+        // PV: each active K16 slice selects the next row atom. The descriptor
+        // leading stride spans all row atoms to reach the next N64 panel.
+        desc = bLoader.localizedSmemLoad(0, 0);
+        tileOffset = k / tiledSMEMTileK;
+      }
+      int64_t tileByteOffset = tileOffset * tileBytes;
+      assert(tileByteOffset % 16 == 0 &&
+             "panel-major tile must use WGMMA descriptor units");
+      if (tileByteOffset != 0)
+        desc.baseb128 =
+            tb.add(desc.baseb128, tb.i64_val(tileByteOffset / 16));
+      return {desc.baseb128, desc.descriptorImm};
+    }
+
     int64_t storageTile = 0;
     int localK = k;
     int localN = n;
