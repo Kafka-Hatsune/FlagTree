@@ -239,6 +239,17 @@ selectLogicalSMEMStorageTileShape(ttg::MemDescType stageType,
   if (storageTile[fragmentAxis] < kExactSMEMFragmentQuantum ||
       logicalShape[fragmentAxis] % storageTile[fragmentAxis] != 0)
     return failure();
+
+  // f16/bf16 WGMMA matrix descriptors consume a 16x64 shared-memory atom.
+  // Panel the otherwise power-of-two column axis as well, so row fragments
+  // are laid out [K64][N16]. A native m64n80k16 can then traverse all five
+  // N16 atoms with one descriptor, and PV can reuse the same stage as K16
+  // slices. Other types retain the established full-axis storage tile.
+  Type elementType = stageType.getElementType();
+  if (fragmentedRows &&
+      isa<Float16Type, BFloat16Type>(elementType) &&
+      logicalShape[1] >= 64 && logicalShape[1] % 64 == 0)
+    storageTile[1] = 64;
   return storageTile;
 }
 

@@ -144,7 +144,7 @@ static Value createFullTileIndex(OpBuilder &builder, Location loc,
 
 static void applyLogicalPointerCopy(LogicalPointerCopyAction &action,
                                     ArrayRef<int64_t> storageTileShape,
-                                    int64_t tilesPerStage,
+                                    ArrayRef<int64_t> logicalShape,
                                     unsigned fragmentAxis) {
   LocalPointersOp pointers = action.pointers;
   triton::StoreOp store = action.store;
@@ -161,6 +161,8 @@ static void applyLogicalPointerCopy(LogicalPointerCopyAction &action,
       stage.atom.getType().getElementType());
   int64_t storageRowTiles = storageTileShape[0] / microTileShape[0];
   int64_t storageColTiles = storageTileShape[1] / microTileShape[1];
+  int64_t logicalRowTiles = logicalShape[0] / storageTileShape[0];
+  int64_t logicalColTiles = logicalShape[1] / storageTileShape[1];
   int64_t sourceGridCols = carrierShape[1] / microTileShape[1];
   auto originalPtrType = cast<RankedTensorType>(pointers.getResult().getType());
   auto microPtrType =
@@ -169,49 +171,53 @@ static void applyLogicalPointerCopy(LogicalPointerCopyAction &action,
 
   OpBuilder builder(store);
   Location loc = store.getLoc();
-  for (int64_t fragmentTile = 0; fragmentTile < tilesPerStage; ++fragmentTile) {
-    Value flatIndex =
-        addOffset(builder, loc, stage.atom.getIndex(), fragmentTile);
-    auto storageTile = ttg::MemDescIndexOp::create(
-        builder, loc, stage.atom.getType(), stage.atom.getSrc(), flatIndex);
-    storageTile->setAttr(kExactSMEMTileAttr,
-                         builder.getI32IntegerAttr(fragmentTile));
+  for (int64_t logicalRowTile = 0; logicalRowTile < logicalRowTiles;
+       ++logicalRowTile) {
+    for (int64_t logicalColTile = 0; logicalColTile < logicalColTiles;
+         ++logicalColTile) {
+      int64_t tile = fragmentAxis == 0
+                         ? logicalColTile * logicalRowTiles + logicalRowTile
+                         : logicalRowTile * logicalColTiles + logicalColTile;
+      Value flatIndex = addOffset(builder, loc, stage.atom.getIndex(), tile);
+      auto storageTile = ttg::MemDescIndexOp::create(
+          builder, loc, stage.atom.getType(), stage.atom.getSrc(), flatIndex);
+      storageTile->setAttr(kExactSMEMTileAttr,
+                           builder.getI32IntegerAttr(tile));
 
-    for (int64_t storageRowTile = 0; storageRowTile < storageRowTiles;
-         ++storageRowTile) {
-      for (int64_t storageColTile = 0; storageColTile < storageColTiles;
-           ++storageColTile) {
-        int64_t sourceRowTile =
-            fragmentAxis == 0
-                ? fragmentTile * storageRowTiles + storageRowTile
-                : storageRowTile;
-        int64_t sourceColTile =
-            fragmentAxis == 1
-                ? fragmentTile * storageColTiles + storageColTile
-                : storageColTile;
-        int64_t sourceLinearTile =
-            sourceRowTile * sourceGridCols + sourceColTile;
-        Value tiledPtr = createStaticExtractTile(
-            builder, loc, load.getPtr(), sourceLinearTile, microTileShape);
-        Value tiledMask = createStaticExtractTile(
-            builder, loc, load.getMask(), sourceLinearTile, microTileShape);
-        Value tiledOther = createStaticExtractTile(
-            builder, loc, load.getOther(), sourceLinearTile, microTileShape);
-        Value tiledLoad = triton::LoadOp::create(
-            builder, loc, tiledPtr, tiledMask, tiledOther, load.getCache(),
-            load.getEvict(), load.getIsVolatile(), load.getFlagtreeHintsAttr());
+      for (int64_t storageRowTile = 0; storageRowTile < storageRowTiles;
+           ++storageRowTile) {
+        for (int64_t storageColTile = 0; storageColTile < storageColTiles;
+             ++storageColTile) {
+          int64_t sourceRowTile =
+              logicalRowTile * storageRowTiles + storageRowTile;
+          int64_t sourceColTile =
+              logicalColTile * storageColTiles + storageColTile;
+          int64_t sourceLinearTile =
+              sourceRowTile * sourceGridCols + sourceColTile;
+          Value tiledPtr = createStaticExtractTile(
+              builder, loc, load.getPtr(), sourceLinearTile, microTileShape);
+          Value tiledMask = createStaticExtractTile(
+              builder, loc, load.getMask(), sourceLinearTile, microTileShape);
+          Value tiledOther = createStaticExtractTile(
+              builder, loc, load.getOther(), sourceLinearTile,
+              microTileShape);
+          Value tiledLoad = triton::LoadOp::create(
+              builder, loc, tiledPtr, tiledMask, tiledOther, load.getCache(),
+              load.getEvict(), load.getIsVolatile(),
+              load.getFlagtreeHintsAttr());
 
-        SmallVector<Value, 2> indices;
-        indices.push_back(createFullTileIndex(
-            builder, loc, microTileShape, 0,
-            storageRowTile * microTileShape[0]));
-        indices.push_back(createFullTileIndex(
-            builder, loc, microTileShape, 1,
-            storageColTile * microTileShape[1]));
-        Value tiledPointers = LocalPointersOp::create(
-            builder, loc, microPtrType, storageTile, indices);
-        triton::StoreOp::create(builder, loc, tiledPointers, tiledLoad,
-                                store.getCache(), store.getEvict());
+          SmallVector<Value, 2> indices;
+          indices.push_back(createFullTileIndex(
+              builder, loc, microTileShape, 0,
+              storageRowTile * microTileShape[0]));
+          indices.push_back(createFullTileIndex(
+              builder, loc, microTileShape, 1,
+              storageColTile * microTileShape[1]));
+          Value tiledPointers = LocalPointersOp::create(
+              builder, loc, microPtrType, storageTile, indices);
+          triton::StoreOp::create(builder, loc, tiledPointers, tiledLoad,
+                                  store.getCache(), store.getEvict());
+        }
       }
     }
   }
@@ -231,11 +237,10 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
          "validated root must select a storage tile");
   int64_t storageTileRows = action.storageTileShape[0];
   int64_t storageTileCols = action.storageTileShape[1];
-  unsigned fragmentAxis = storageTileRows != rows ? 0u : 1u;
-  int64_t fragmentExtent = fragmentAxis == 0 ? rows : cols;
-  int64_t fragmentTileExtent =
-      fragmentAxis == 0 ? storageTileRows : storageTileCols;
-  int64_t tilesPerStage = fragmentExtent / fragmentTileExtent;
+  unsigned fragmentAxis = !llvm::isPowerOf2_64(rows) ? 0u : 1u;
+  int64_t rowTiles = rows / storageTileRows;
+  int64_t colTiles = cols / storageTileCols;
+  int64_t tilesPerStage = rowTiles * colTiles;
   SmallVector<int64_t> exactShape{capacity * tilesPerStage, storageTileRows,
                                   storageTileCols};
   SmallVector<int64_t> storageTileShape{storageTileRows, storageTileCols};
@@ -305,7 +310,8 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
   }
 
   for (LogicalPointerCopyAction &copy : action.pointerCopies)
-    applyLogicalPointerCopy(copy, storageTileShape, tilesPerStage,
+    applyLogicalPointerCopy(copy, storageTileShape,
+                            ArrayRef<int64_t>(action.logicalShape).drop_front(),
                             fragmentAxis);
 
   for (ttg::TMACopyOp copy : action.copies) {
@@ -318,35 +324,44 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
         stage.atom.getType().getEncoding(), stageType.getMemorySpace(),
         stageType.getMutableMemory(),
         storageTileShape);
-    for (int64_t tile = 0; tile < tilesPerStage; ++tile) {
-      Value flatIndex = addOffset(copyBuilder, copy.getLoc(),
-                                  stage.atom.getIndex(), tile);
-      auto storageTile = ttg::MemDescIndexOp::create(
-          copyBuilder, copy.getLoc(), storageTileType, stage.atom.getSrc(),
-          flatIndex);
-      storageTile->setAttr(kExactSMEMTileAttr,
-                           copyBuilder.getI32IntegerAttr(tile));
-      SmallVector<Value> indices(copy.getIndices().begin(),
-                                 copy.getIndices().end());
-      unsigned coordinate = indices.size() - 2 + fragmentAxis;
-      indices[coordinate] = addOffset(copyBuilder, copy.getLoc(),
-                                      indices[coordinate],
-                                      tile * fragmentTileExtent);
+    for (int64_t rowTile = 0; rowTile < rowTiles; ++rowTile) {
+      for (int64_t colTile = 0; colTile < colTiles; ++colTile) {
+        int64_t tile = fragmentAxis == 0
+                           ? colTile * rowTiles + rowTile
+                           : rowTile * colTiles + colTile;
+        Value flatIndex = addOffset(copyBuilder, copy.getLoc(),
+                                    stage.atom.getIndex(), tile);
+        auto storageTile = ttg::MemDescIndexOp::create(
+            copyBuilder, copy.getLoc(), storageTileType, stage.atom.getSrc(),
+            flatIndex);
+        storageTile->setAttr(kExactSMEMTileAttr,
+                             copyBuilder.getI32IntegerAttr(tile));
+        SmallVector<Value> indices(copy.getIndices().begin(),
+                                   copy.getIndices().end());
+        unsigned rowCoordinate = indices.size() - 2;
+        unsigned colCoordinate = indices.size() - 1;
+        indices[rowCoordinate] = addOffset(
+            copyBuilder, copy.getLoc(), indices[rowCoordinate],
+            rowTile * storageTileRows);
+        indices[colCoordinate] = addOffset(
+            copyBuilder, copy.getLoc(), indices[colCoordinate],
+            colTile * storageTileCols);
 #ifdef __HCU__
-      auto tiledCopy = ttg::TMACopyOp::create(copyBuilder, copy.getLoc(),
-                                              copy.getSrc(), storageTile,
-                                              indices);
+        auto tiledCopy = ttg::TMACopyOp::create(copyBuilder, copy.getLoc(),
+                                                copy.getSrc(), storageTile,
+                                                indices);
 #else
-      auto tiledCopy = ttg::TMACopyOp::create(
-          copyBuilder, copy.getLoc(), copy.getSrc(), storageTile, indices,
-          Value(), IntegerAttr());
+        auto tiledCopy = ttg::TMACopyOp::create(
+            copyBuilder, copy.getLoc(), copy.getSrc(), storageTile, indices,
+            Value(), IntegerAttr());
 #endif
-      int64_t elementBytes =
-          oldType.getElementType().getIntOrFloatBitWidth() / 8;
-      tiledCopy->setAttr(
-          kLogicalTMACopyBytesAttr,
-          copyBuilder.getI64IntegerAttr(storageTileRows * storageTileCols *
-                                        elementBytes));
+        int64_t elementBytes =
+            oldType.getElementType().getIntOrFloatBitWidth() / 8;
+        tiledCopy->setAttr(
+            kLogicalTMACopyBytesAttr,
+            copyBuilder.getI64IntegerAttr(storageTileRows * storageTileCols *
+                                          elementBytes));
+      }
     }
   }
 
