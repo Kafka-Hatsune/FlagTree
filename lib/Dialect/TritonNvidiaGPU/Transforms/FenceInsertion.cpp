@@ -242,23 +242,6 @@ private:
     }
   }
 
-  void findAsyncCopyToSharedUsers(Value value, DenseSet<Value> &visitedValues,
-                                  llvm::SetVector<Operation *> &result) {
-    if (!visitedValues.insert(value).second)
-      return;
-    for (Operation *user : value.getUsers()) {
-      if (auto asyncCopy = dyn_cast<ttg::AsyncCopyGlobalToLocalOp>(user)) {
-        if (asyncCopy.getResult() == value)
-          result.insert(user);
-        continue;
-      }
-      if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
-        for (Value viewResult : user->getResults())
-          findAsyncCopyToSharedUsers(viewResult, visitedValues, result);
-      }
-    }
-  }
-
 #ifdef __TLE__
   void
   findLocalStoresThroughMemDescViews(Value value,
@@ -386,11 +369,10 @@ private:
           }
         }
 #ifdef __TLE__
-        DenseSet<Value> visitedValues;
-        findAsyncCopyToSharedUsers(localAlloc.getResult(), visitedValues,
-                                   result);
-        if (!result.empty())
-          return;
+        // Do not classify async global-to-local users as register-to-shared
+        // producers. Their writes are ordered by the async copy token/barrier;
+        // inserting fence_async_shared for them creates a false WGMMA
+        // dependency and breaks an otherwise valid launch pipeline.
 #endif
       }
       // if it is not an alloc, iterate over the operands.
