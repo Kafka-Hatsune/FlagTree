@@ -18,6 +18,10 @@ using namespace mlir::triton;
 using namespace mlir::triton::gpu;
 using mlir::LLVM::NVIDIA::lowerLdStMatrix;
 
+#ifdef __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
+#else  // __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
+constexpr int kPtrBitWidth = 64;
+#endif // __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
 struct ConvertLayoutOpSwizzlingConversion
     : public ConvertOpToLLVMPattern<triton::gpu::ConvertLayoutOp> {
   const NVIDIA::TargetInfo &targetInfo;
@@ -37,11 +41,11 @@ struct ConvertLayoutOpSwizzlingConversion
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
 
-#if defined(__TLE__) && defined(__NVIDIA__)
+#ifdef __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
     if (auto plan = planSameWarpShuffleConversion(srcTy, dstTy))
       return transferSameWarpShuffle(op, adaptor, *plan, rewriter);
-#endif // defined(__TLE__) && defined(__NVIDIA__)
 
+#endif // __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
     LinearLayout conversion = minimalCvtLayout(srcTy, dstTy);
     LinearLayout srcLayout = toLinearLayout(srcTy);
     LinearLayout dstLayout = toLinearLayout(dstTy);
@@ -79,7 +83,7 @@ struct ConvertLayoutOpSwizzlingConversion
     return failure();
   }
 
-#if defined(__TLE__) && defined(__NVIDIA__)
+#ifdef __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
   LogicalResult
   transferSameWarpShuffle(ConvertLayoutOp op, OpAdaptor adaptor,
                           const SameWarpShufflePlan &plan,
@@ -123,7 +127,8 @@ struct ConvertLayoutOpSwizzlingConversion
                                        {{kReg, b.i32_val(dstReg)},
                                         {kLane, laneId},
                                         {kWarp, logicalWarpId},
-                                        {kBlock, blockId}});
+                                        { kBlock,
+                                          blockId }});
       assert(srcLane.size() == 1 && srcLane.front().first == kLane);
       outVals.push_back(targetInfo.shuffleIdx(
           rewriter, loc, inVals[srcRegIt->second], srcLane.front().second));
@@ -138,8 +143,8 @@ struct ConvertLayoutOpSwizzlingConversion
     rewriter.replaceOp(op, result);
     return success();
   }
-#endif // defined(__TLE__) && defined(__NVIDIA__)
 
+#endif // __FLAGTREE_SAME_WARP_LAYOUT_SHUFFLE__
   SmallVector<Value> transferWithinBlockSwizzling(
       Location loc, ConversionPatternRewriter &rewriter,
       const LinearLayout &srcLayout, const LinearLayout &dstLayout,
