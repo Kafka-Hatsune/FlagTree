@@ -262,6 +262,45 @@ class shared_layout(layout):
         raise NotImplementedError(f"{self.__class__.__name__}.to_ir() must be overridden in subclasses")
 
 
+class _shared_linear_layout(shared_layout):
+    """Internal wrapper for an inferred SharedLinearEncoding."""
+
+    def __init__(self, offset_bases, block_bases, alignment, rank):
+        super().__init__()
+        self.offset_bases = [list(basis) for basis in offset_bases]
+        self.block_bases = [list(basis) for basis in block_bases]
+        self.alignment = int(alignment)
+        self.rank = int(rank)
+
+        if self.rank <= 0:
+            raise ValueError("shared linear layout requires a positive rank")
+        if any(len(basis) != self.rank for basis in (*self.offset_bases, *self.block_bases)):
+            raise ValueError("shared linear layout bases must have a consistent rank")
+        if self.alignment <= 0 or self.alignment & (self.alignment - 1):
+            raise ValueError("shared linear layout alignment must be a positive power of two")
+
+    def make_permute(self, dims):
+        return _shared_linear_layout(
+            [[basis[dim] for dim in dims] for basis in self.offset_bases],
+            [[basis[dim] for dim in dims] for basis in self.block_bases],
+            self.alignment,
+            self.rank,
+        )
+
+    def to_ir(self, builder: ir.builder) -> None:
+        return builder.make_shared_linear_encoding_attr(
+            self.offset_bases,
+            self.block_bases,
+            self.alignment,
+            self.rank,
+        )
+
+    def __eq__(self, other) -> bool:
+        return (type(self) is type(other) and self.offset_bases == other.offset_bases
+                and self.block_bases == other.block_bases and self.alignment == other.alignment
+                and self.rank == other.rank)
+
+
 class swizzled_shared_layout(shared_layout):
 
     def __init__(self, vectorSize, perPhase, maxPhase, order, numCTAs, numCTAsPerCGA, numCTASplit, numCTAOrder):
@@ -458,36 +497,31 @@ def _make_slot_layout(src_layout: shared_layout, slot_shape: List[int]) -> share
     raise ValueError(f"buffered_tensor.slot does not support layout {type(src_layout).__name__}")
 
 
-def _make_reshape_layout(src_layout: shared_layout, dst_shape: List[int]) -> shared_layout:
-    """Rebuild an NV-MMA encoding when core reshape inference preserves it."""
-    rank = len(dst_shape)
-    if not isinstance(src_layout, nv_mma_shared_layout):
-        raise ValueError("buffered_tensor.reshape currently requires nv_mma_shared_layout; "
-                         "other shared encodings lower to SharedLinearEncoding, which TLE "
-                         "does not expose yet")
-    if any(value != 1 for value in (*src_layout.numCTAsPerCGA, *src_layout.numCTASplit)):
-        raise ValueError("buffered_tensor.reshape currently requires a single-CTA nv_mma_shared_layout")
-
-    src_rank = len(src_layout.shape)
-    row_major = src_layout.order == list(reversed(range(src_rank)))
-    column_major = src_layout.order == list(range(src_rank))
-    if not (row_major or column_major):
-        raise ValueError("buffered_tensor.reshape requires a canonical row- or column-major NV-MMA order")
-    src_inner = src_layout.shape[-1] if row_major else src_layout.shape[0]
-    dst_inner = dst_shape[-1] if row_major else dst_shape[0]
-    if src_inner != dst_inner:
-        raise ValueError("buffered_tensor.reshape must preserve the NV-MMA innermost dimension")
-
-    return nv_mma_shared_layout(
-        list(dst_shape),
-        list(reversed(range(rank))) if row_major else list(range(rank)),
-        src_layout.elemType,
-        [1] * rank,
-        [1] * rank,
-        list(reversed(range(rank))),
-        src_layout.fp4Padded,
-        src_layout.swizzled,
-    )
+def _layout_from_reshaped_memdesc(handle, shape, element_ty, builder) -> shared_layout:
+    """Mirror the encoding already inferred by MemDescReshapeOp."""
+    inferred = builder.get_tle_shared_layout_from_memdesc(handle)
+    kind = inferred["kind"]
+    if kind == "shared_linear":
+        return _shared_linear_layout(
+            inferred["offset_bases"],
+            inferred["block_bases"],
+            inferred["alignment"],
+            inferred["rank"],
+        )
+    if kind == "nv_mma":
+        rank = len(shape)
+        transposed = inferred["transposed"]
+        return nv_mma_shared_layout(
+            list(shape),
+            list(range(rank)) if transposed else list(reversed(range(rank))),
+            element_ty,
+            list(inferred["ctas_per_cga"]),
+            list(inferred["cta_split_num"]),
+            list(inferred["cta_order"]),
+            inferred["fp4_padded"],
+            inferred["swizzled"],
+        )
+    raise ValueError(f"unsupported inferred shared-memory reshape encoding: {kind}")
 
 
 class buffered_tensor(tl.base_value):
@@ -560,7 +594,10 @@ class buffered_tensor(tl.base_value):
         if math.prod(shape) != math.prod(self.shape):
             raise ValueError(f"buffered_tensor.reshape total elements mismatch: {self.shape} -> {shape}")
         handle = _semantic.builder.create_memdesc_reshape(self.handle, shape)
-        reshaped_layout = _make_reshape_layout(self.type.layout, shape)
+        reshaped_layout = _layout_from_reshaped_memdesc(handle, shape, self.dtype, _semantic.builder)
+        alloc_shape = self.type.alloc_shape
+        prefix_len = len(alloc_shape) - len(self.shape)
+        reshaped_alloc_shape = alloc_shape[:prefix_len] + shape
         return buffered_tensor(
             handle,
             self.dtype,
@@ -568,7 +605,7 @@ class buffered_tensor(tl.base_value):
             self.type.storage,
             reshaped_layout,
             _semantic,
-            alloc_shape=shape,
+            alloc_shape=reshaped_alloc_shape,
         )
 
     def make_permute(self, handle, dims):
