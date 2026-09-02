@@ -978,7 +978,6 @@ def copy(
     offsets: Sequence[constexpr | tensor] = None,
     barrier=None,
     mask=None,
-    other=None,
     _semantic: TLESemantic | None = None,
 ) -> None:
     """
@@ -1013,11 +1012,8 @@ def copy(
             The barrier must come from ``tle.gpu.alloc_barrier(s)(expect_bytes=...)``.
         mask: Optional elementwise mask for standard pointer-tensor copies. For
             global-to-local copies, masked elements are written to local memory
-            using ``other``. For local-to-global copies, masked elements are not
-            stored. TMA descriptor copies do not accept a mask.
-        other: Value used for masked elements of a standard global-to-local
-            copy. TMA descriptor copies and local-to-global copies do not accept
-            ``other``.
+            as zero. For local-to-global copies, masked elements are not stored.
+            TMA descriptor copies do not accept a mask.
         _semantic: Internal semantic analyzer for validation and compilation (user-provided)
 
     Raises:
@@ -1038,7 +1034,7 @@ def copy(
             tle.gpu.barrier_wait(bar, phaseIdx=0)
 
         Masked global -> local copy with zero fill:
-            tle.copy(global_ptrs, local_buf, [64, 128], mask=valid, other=0.0)
+            tle.copy(global_ptrs, local_buf, [64, 128], mask=valid)
     """
     mthreads_enabled = mthreads_common.enabled()
     iluvatar_enabled = iluvatar_copy.enabled()
@@ -1049,7 +1045,6 @@ def copy(
         shape: tuple,
         direction,
         mask=None,
-        other=None,
         _semantic: TLESemantic | None = None,
     ) -> None:
         if mthreads_enabled:
@@ -1066,11 +1061,11 @@ def copy(
             warnings.warn("TLE semantic analysis module not available, skipping validation", UserWarning)
 
         mask = tl._unwrap_if_constexpr(mask)
-        other = tl._unwrap_if_constexpr(other)
         if mask is not None:
             mask = _semantic.to_tensor(mask)
-        if other is not None:
-            other = _semantic.to_tensor(other)
+        # A masked global-to-local copy implicitly uses other=0. NVIDIA
+        # cp.async can implement this contract directly with zero-fill.
+        zero_fill = (_semantic.to_tensor(0.0) if direction == CopyDirection.GM_TO_LOCAL and mask is not None else None)
         boundary_check = ()
         padding_option = ""
         cache_modifier = ""
@@ -1082,21 +1077,19 @@ def copy(
                 if iluvatar_enabled:
                     # Iluvatar's semantic.load carries an extra `stride` (SME) slot
                     # right after `other`; TLE copy never uses the SME path.
-                    tt_load = _semantic.load(src, mask, other, None, boundary_check, padding_option, cache_modifier,
+                    tt_load = _semantic.load(src, mask, zero_fill, None, boundary_check, padding_option, cache_modifier,
                                              eviction_policy, volatile)
                 else:
                     # None fills the FlagTree hints slot; TLE copy has no hints to pass.
                     load_extra_args = () if mthreads_enabled else (None, )
-                    tt_load = _semantic.load(src, mask, other, boundary_check, padding_option, cache_modifier,
+                    tt_load = _semantic.load(src, mask, zero_fill, boundary_check, padding_option, cache_modifier,
                                              eviction_policy, volatile, *load_extra_args)
                 local_ptrs = local_ptr(dst, _make_full_indices(dst, _semantic), _semantic=_semantic)
                 # Every local element is initialized. A false source mask is
-                # represented by the loaded ``other`` value rather than by
-                # suppressing the shared-memory store.
+                # represented by the loaded zero rather than by suppressing
+                # the shared-memory store.
                 _semantic.store(local_ptrs, tt_load, None, boundary_check, cache_modifier, eviction_policy)
             else:
-                if other is not None:
-                    raise ValueError("copy other is only supported for global-to-local copies")
                 local_ptrs = local_ptr(src, _make_full_indices(src, _semantic), _semantic=_semantic)
                 load = tl.load(local_ptrs, _semantic=_semantic)
                 _semantic.store(dst, load, mask, boundary_check, cache_modifier, eviction_policy)
@@ -1206,9 +1199,9 @@ def copy(
     if is_normcopy:
         if barrier is not None:
             raise ValueError("copy barrier is only supported for TMA global-to-shared copy")
-        return normcopy(src, dst, shape, direction, mask, other, _semantic)
-    if mask is not None or other is not None:
-        raise ValueError("copy mask and other are only supported for standard pointer-tensor copies")
+        return normcopy(src, dst, shape, direction, mask, _semantic)
+    if mask is not None:
+        raise ValueError("copy mask is only supported for standard pointer-tensor copies")
     if mthreads_enabled:
         barrier_slot = None
         if barrier is not None:
