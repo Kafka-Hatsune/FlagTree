@@ -6,7 +6,6 @@ import triton.experimental.tle.language as tle
 
 from triton.experimental.tle.language.gpu.types import _shared_linear_layout
 
-
 _ROWS = 32
 _OLD_COLS = 512
 _GROUPS = 4
