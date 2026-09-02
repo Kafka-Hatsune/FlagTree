@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 import triton.experimental.tle.language as tle
 
+from triton._internal_testing import is_hopper_or_newer
 from triton.experimental.tle.language.gpu.types import _shared_linear_layout
 
 _ROWS = 32
@@ -148,7 +149,7 @@ def _reshape_nv_mma_preserving_kernel(dst):
     tl.store(dst, tl.load(ptr))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="requires NVIDIA Hopper or newer")
 @pytest.mark.require_tle("gpu.alloc", "gpu.buffered_tensor.reshape", "gpu.copy", "gpu.local_ptr")
 def test_buffered_tensor_reshape_shared_linear_fallback_executes_without_copying():
     src = torch.arange(_NUMEL, device="cuda", dtype=torch.float32).to(torch.float16)
@@ -163,7 +164,7 @@ def test_buffered_tensor_reshape_shared_linear_fallback_executes_without_copying
     torch.testing.assert_close(dst, src, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="requires NVIDIA Hopper or newer")
 @pytest.mark.require_tle("gpu.alloc", "gpu.buffered_tensor.reshape", "gpu.local_ptr")
 def test_buffered_tensor_reshape_preserves_nv_mma_when_exactly_representable():
     dst = torch.empty(1, device="cuda", dtype=torch.float16)

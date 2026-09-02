@@ -19,6 +19,7 @@ import triton.experimental.tle.language as tle
 #import triton.experimental.tle.mega as tlem
 from triton._filecheck import run_parser
 from triton.backends.compiler import GPUTarget
+from triton._internal_testing import is_ampere_or_newer
 from triton.language.core import base_value
 from triton.runtime.jit import MockTensor
 from triton.experimental.tle.language.gpu.core import _deduplicate_warp_specialize_captures
@@ -172,7 +173,10 @@ class TestCopyFrontend:
         assert "arith.constant dense<0.000000e+00> : tensor<16xf32>" in ir
         assert "tt.load" in ir
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    @pytest.mark.skipif(
+        not is_ampere_or_newer(),
+        reason="cp.async regression guard requires NVIDIA Ampere or newer",
+    )
     @pytest.mark.require_tle("gpu.alloc", "gpu.copy", "gpu.local_ptr")
     def test_masked_copy_implicitly_uses_other_zero_end_to_end(self):
         # All source values are non-zero, so zeros in masked lanes must come
