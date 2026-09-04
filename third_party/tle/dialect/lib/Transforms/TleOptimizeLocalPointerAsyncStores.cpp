@@ -22,6 +22,7 @@
  */
 
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "tle/dialect/include/Transforms/TransformAttrs.h"
 
@@ -229,6 +230,11 @@ matchStaticSubviewMemDesc(triton::StoreOp store) {
   Value ptr = stripConvertLayouts(store.getPtr());
   auto localPointers = ptr.getDefiningOp<tle::LocalPointersOp>();
   if (!localPointers)
+    return std::nullopt;
+  // A tiled stage carrier may contain an unallocated power-of-two tail.
+  // Producer stores must use exact tile views so a generic full local_ptr
+  // store cannot be rewritten into an out-of-bounds cp.async.
+  if (getExactSMEMStage(localPointers.getSrc()))
     return std::nullopt;
 
   auto valueTy = dyn_cast<RankedTensorType>(store.getValue().getType());

@@ -32,11 +32,13 @@
 #include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "tle/dialect/include/Analysis/TlePipeEffectAnalysis.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "tle/dialect/include/Transforms/TransformAttrs.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -140,6 +142,17 @@ static bool containsPipeLifecycleOp(tt::FuncOp func) {
   return found;
 }
 
+static Value canonicalizePipeField(Value field);
+static Value getMemDescRoot(Value value);
+
+template <typename ExactView>
+static bool sameExactSMEMStage(const ExactView &view, Value stage) {
+  if (std::optional<int64_t> exactStage = view.getStaticStage())
+    if (std::optional<int64_t> otherStage = getExactSMEMConstant(stage))
+      return *exactStage == *otherStage;
+  return sameIndexValue(view.getStage(), stage);
+}
+
 static LogicalResult inlinePipeCall(tt::CallOp call, tt::FuncOp callee) {
   if (callee.isExternal())
     return call.emitOpError(
@@ -240,6 +253,21 @@ static Value canonicalizePipeField(Value field) {
 static Value getMemDescRoot(Value value) {
   Value current = canonicalizePipeField(value);
   while (true) {
+    if (auto result = dyn_cast<OpResult>(current)) {
+      if (auto wait =
+              dyn_cast<triton::nvidia_gpu::WarpGroupDotWaitOp>(
+                  result.getOwner())) {
+        unsigned resultNo = result.getResultNumber();
+        if (resultNo < wait.getNumOperands()) {
+          current = canonicalizePipeField(wait.getOperand(resultNo));
+          continue;
+        }
+      }
+    }
+    if (auto view = current.getDefiningOp<MemDescWGMMAViewOp>()) {
+      current = canonicalizePipeField(view.getSrc());
+      continue;
+    }
     if (auto index = current.getDefiningOp<ttg::MemDescIndexOp>()) {
       current = canonicalizePipeField(index.getSrc());
       continue;
@@ -315,6 +343,9 @@ static std::string getPipeKey(Operation *op) {
     pipeName.print(os);
   os << "|";
   op->getAttr("field_names").print(os);
+  os << "|";
+  if (Attribute tiled = op->getAttr("tiled_smem_fields"))
+    tiled.print(os);
   os << "|";
   for (Value field : getPipeFields(op))
     os << canonicalizePipeField(field).getAsOpaquePointer() << ",";
@@ -551,6 +582,17 @@ getCommitFieldRootForStore(Value memdesc, PipeWriterCommitOp commit) {
   Value current = canonicalizePipeField(memdesc);
   bool sawStageIndex = false;
   while (true) {
+    if (ExactSMEMTile tile = getExactSMEMTile(current)) {
+      if (!sameExactSMEMStage(tile, commit.getStage()))
+        return std::nullopt;
+      sawStageIndex = true;
+      current = canonicalizePipeField(tile.getSrc());
+      continue;
+    }
+    // A padded tiled stage is a read-only WGMMA carrier. Treating it as a
+    // producer target could write into an unallocated tail.
+    if (getExactSMEMStage(current))
+      return std::nullopt;
     if (auto index = current.getDefiningOp<ttg::MemDescIndexOp>()) {
       if (!sameIndexValue(index.getIndex(), commit.getStage()))
         return std::nullopt;

@@ -601,6 +601,15 @@ def _normalize_barrier_init(init) -> str:
     raise ValueError("barrier init must be tle.gpu.PENDING or tle.gpu.READY")
 
 
+def _normalize_barrier_arrival_mode(arrival_mode) -> str:
+    arrival_mode = _unwrap_barrier_constexpr(arrival_mode)
+    if not isinstance(arrival_mode, str):
+        raise ValueError("arrival_mode must be a compile-time string")
+    if arrival_mode not in ("elected", "participant"):
+        raise ValueError("arrival_mode must be 'elected' or 'participant'")
+    return arrival_mode
+
+
 # NVIDIA hardware named barriers are ids 0..15. TLE frontend assigns virtual
 # ids from 16 upward so each source barrier is distinguishable until the late
 # compiler pass remaps them to conflict-free physical ids.
@@ -706,15 +715,24 @@ def alloc_barriers(
     arrive_count=1,
     init=tle.PENDING,
     expect_bytes=None,
+    arrival_mode="elected",
     _semantic: TLESemantic | None = None,
     _generator=None,
 ) -> tle.barrier:
-    """Allocate a TLE GPU barrier array."""
+    """Allocate a TLE GPU barrier array.
+
+    ``arrival_mode`` controls phase-indexed direct arrivals. In ``"elected"``
+    mode one thread arrives on behalf of the current partition. In
+    ``"participant"`` mode every partition thread performs a unit arrival and
+    the compiler scales the initialization count accordingly. Descriptor/TMA
+    completion barriers require ``"elected"`` mode.
+    """
     _mark_wgmma_user_promise(_semantic, _generator)
 
     num_barriers = _require_barrier_int(num_barriers, "num_barriers")
     arrive_count = _require_barrier_int(arrive_count, "arrive_count")
     init = _normalize_barrier_init(init)
+    arrival_mode = _normalize_barrier_arrival_mode(arrival_mode)
     if num_barriers <= 0:
         raise ValueError("num_barriers must be positive")
     if arrive_count <= 0:
@@ -726,10 +744,12 @@ def alloc_barriers(
             raise ValueError("expect_bytes must be a compile-time integer or None")
         if expect_bytes <= 0:
             raise ValueError("expect_bytes must be positive when provided")
+        if arrival_mode == "participant":
+            raise ValueError("arrival_mode='participant' does not support TMA barriers with expect_bytes")
 
     layout = tle.swizzled_shared_layout.make_default(rank=2)
     named_base_id = 0
-    barrier_ty = tle.barrier_type(num_barriers, arrive_count, init, expect_bytes, layout, _semantic,
+    barrier_ty = tle.barrier_type(num_barriers, arrive_count, init, expect_bytes, arrival_mode, layout, _semantic,
                                   shape=[num_barriers, 1], named_base_id=named_base_id)
     handle = _semantic.builder.create_barrier_alloc(
         barrier_ty.to_ir(_semantic.builder),
@@ -737,10 +757,11 @@ def alloc_barriers(
         arrive_count,
         1 if init == tle.READY else 0,
         -1 if expect_bytes is None else expect_bytes,
+        arrival_mode,
     )
     allocation_key = _barrier_handle_key(handle)
     barrier_ty.allocation_key = allocation_key
-    return tle.barrier(handle, num_barriers, arrive_count, init, expect_bytes, layout, _semantic,
+    return tle.barrier(handle, num_barriers, arrive_count, init, expect_bytes, arrival_mode, layout, _semantic,
                        shape=[num_barriers, 1], named_base_id=named_base_id, allocation_key=allocation_key)
 
 
@@ -749,6 +770,7 @@ def alloc_barrier(
     arrive_count=1,
     init=tle.PENDING,
     expect_bytes=None,
+    arrival_mode="elected",
     _semantic: TLESemantic | None = None,
     _generator=None,
 ) -> tle.barrier:
@@ -759,6 +781,7 @@ def alloc_barrier(
         arrive_count,
         init,
         expect_bytes,
+        arrival_mode,
         _semantic=_semantic,
     )
 
@@ -768,6 +791,8 @@ def barrier_wait(barr, phaseIdx=None, _semantic: TLESemantic | None = None) -> N
     """Wait on a TLE GPU barrier slot."""
     slot = _barrier_slot(barr, _semantic)
     if phaseIdx is None:
+        if slot.arrival_mode == "participant":
+            raise ValueError("arrival_mode='participant' does not support the named barrier backend")
         if slot.expect_bytes is not None:
             raise ValueError("barrier_wait on a barrier with expect_bytes requires phaseIdx")
         if slot.init == tle.READY:
@@ -787,13 +812,21 @@ def barrier_wait(barr, phaseIdx=None, _semantic: TLESemantic | None = None) -> N
 
 @tl.builtin
 def barrier_arrive(barr, arrive_count=1, phaseIdx=None, _semantic: TLESemantic | None = None) -> None:
-    """Arrive on a TLE GPU barrier slot."""
+    """Arrive on a TLE GPU barrier slot.
+
+    A phase-indexed call uses the allocation's ``arrival_mode``. Elected mode
+    emits one logical arrival from the partition's elected thread. Participant
+    mode makes every partition thread publish a unit arrival. Named barriers
+    retain their native collective semantics and require elected mode.
+    """
     slot = _barrier_slot(barr, _semantic)
     arrive_count = _require_barrier_int(arrive_count, "arrive_count")
     if arrive_count <= 0:
         raise ValueError("arrive_count must be positive")
 
     if phaseIdx is None:
+        if slot.arrival_mode == "participant":
+            raise ValueError("arrival_mode='participant' does not support the named barrier backend")
         if slot.expect_bytes is not None:
             raise ValueError("barrier_arrive on a barrier with expect_bytes requires phaseIdx")
         if slot.init == tle.READY:
@@ -1430,10 +1463,10 @@ def copy(
                 raise ValueError(
                     "copy barrier is only supported for TMA global-to-shared copy"
                 )
-            return normcopy(src, dst, shape, direction, mask, other, _semantic)
-        if mask is not None or other is not None:
+            return normcopy(src, dst, shape, direction, mask, _semantic)
+        if mask is not None:
             raise ValueError(
-                "tensor-descriptor tiled SMEM copy does not accept mask or other"
+                "tensor-descriptor tiled SMEM copy does not accept mask"
             )
         return logical_tmacopy(
             src, dst, direction, shape, offsets, barrier, _semantic
