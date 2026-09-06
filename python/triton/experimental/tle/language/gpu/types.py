@@ -576,6 +576,8 @@ class buffered_tensor(tl.base_value):
         if stage_ty != tl.int32:
             raise ValueError(f"buffered_tensor.slot stage must be int32, got {stage_ty}")
 
+        # A slot is an ordinary carrier view. Logical extents are seeded on
+        # local_alloc and propagated through memdesc_index in TTIR.
         slot_shape = list(self.shape[1:])
         slot_layout = _make_slot_layout(self.type.layout, slot_shape)
         slot_ty = buffered_tensor_type(self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
@@ -610,13 +612,17 @@ class buffered_tensor(tl.base_value):
 
     def make_permute(self, handle, dims):
         permuted_layout = self.type.layout.make_permute(dims)
+        alloc_shape = self.type.alloc_shape
+        prefix_len = len(alloc_shape) - len(self.shape)
+        permuted_alloc_shape = alloc_shape[:prefix_len] + [alloc_shape[prefix_len + d] for d in dims]
         return buffered_tensor(
             handle,
             self.dtype,
             [self.shape[d] for d in dims],
-            self.type.num,
             self.type.storage,
             permuted_layout,
+            self.type.semantic,
+            alloc_shape=permuted_alloc_shape,
         )
 
 
