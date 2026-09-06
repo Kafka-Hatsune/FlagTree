@@ -885,8 +885,11 @@ def wgmma(
             raise ValueError("wgmma result M dimension must be divisible by 64")
         if n < 8 or n % 8 != 0:
             raise ValueError("wgmma result N dimension must be divisible by 8")
-    if k < 16:
-        raise ValueError("wgmma K dimension must be at least 16")
+    # The instruction's K quantum depends on dtype, not on whether operand B
+    # came from a logical allocation. In particular TF32 permits a K=8 carrier.
+    min_k = 16 if mthreads_enabled else 256 // a.dtype.primitive_bitwidth
+    if k < min_k:
+        raise ValueError(f"wgmma K dimension must be at least {min_k}")
 
     if not (a.dtype.is_fp8() and b.dtype.is_fp8()):
         if a.dtype != b.dtype:
