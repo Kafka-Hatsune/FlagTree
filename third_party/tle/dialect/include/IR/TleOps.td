@@ -337,7 +337,8 @@ def Tle_WGMMAOp : Tle_Op<"wgmma", [
 }
 
 def Tle_WGMMAWaitOp : Tle_Op<"wgmma_wait", [
-    TypesMatchWith<"result's type matches input's type", "output", "input", "$_self">
+    TypesMatchWith<"result's type matches input's type", "output", "input", "$_self">,
+    SameOperandsAndResultEncoding
 ]> {
   let summary = "wait for TLE dialect-level asynchronous Hopper WGMMA";
 
