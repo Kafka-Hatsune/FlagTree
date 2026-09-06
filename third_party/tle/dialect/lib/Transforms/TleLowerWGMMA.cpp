@@ -26,6 +26,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -45,6 +46,19 @@ namespace ttng = mlir::triton::nvidia_gpu;
 namespace {
 
 static constexpr unsigned kScfForControlOperands = 3;
+static constexpr llvm::StringLiteral
+    kTleWgmmaActiveNAttr("tle.wgmma_active_n");
+static constexpr llvm::StringLiteral
+    kTleWgmmaActiveKAttr("tle.wgmma_active_k");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMOperandBAttr("tle.tiled_smem_operand_b");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMLogicalRowsAttr("tle.tiled_smem_logical_rows");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMLogicalColsAttr("tle.tiled_smem_logical_cols");
+static constexpr llvm::StringLiteral
+    kTleTiledSMEMStorageTileShapeAttr(
+        "tle.tiled_smem_storage_tile_shape");
 
 static std::optional<unsigned> getForInitArgIndex(OpOperand &use) {
   auto forOp = dyn_cast<scf::ForOp>(use.getOwner());
@@ -128,6 +142,19 @@ static bool isMMAEncoded(Value value) {
     return false;
   Attribute encoding = type.getEncoding();
   return encoding && isa<ttg::NvidiaMmaEncodingAttr>(encoding);
+}
+
+static bool isFullActiveN(WGMMAOp op, IntegerAttr activeN) {
+  auto accType = cast<RankedTensorType>(op.getC().getType());
+  SmallVector<int64_t> shapePerCTA =
+      accType.getEncoding() ? ttg::getShapePerCTA(accType)
+                            : SmallVector<int64_t>(accType.getShape());
+  return activeN.getInt() == shapePerCTA[1];
+}
+
+static bool isFullActiveK(WGMMAOp op, IntegerAttr activeK) {
+  auto aType = cast<ttg::TensorOrMemDesc>(op.getA().getType());
+  return activeK.getInt() == aType.getShape()[1];
 }
 
 static Value lookupEncodedAccumulator(Value value,
@@ -230,14 +257,60 @@ struct TritonTleLowerWGMMAPass
             failed = true;
             return;
           }
-          auto nativeDot = ttng::WarpGroupDotOp::create(
+          IntegerAttr activeN = wgmma.getActiveNAttr();
+          IntegerAttr activeK = wgmma.getActiveKAttr();
+          auto dot = ttng::WarpGroupDotOp::create(
               builder, wgmma.getLoc(), acc.getType(), a, wgmma.getB(), acc,
-              Value(), wgmma.getInputPrecision(), wgmma.getMaxNumImpreciseAcc(),
-              wgmma.getIsAsync());
-          encodedAccs[wgmma.getD()] = nativeDot.getD();
+              Value(), wgmma.getInputPrecision(),
+              wgmma.getMaxNumImpreciseAcc(), wgmma.getIsAsync());
+          if (activeN && !isFullActiveN(wgmma, activeN))
+            dot->setDiscardableAttr(kTleWgmmaActiveNAttr, activeN);
+          if (activeK && !isFullActiveK(wgmma, activeK))
+            dot->setDiscardableAttr(kTleWgmmaActiveKAttr, activeK);
+          Value tiledB = wgmma.getB();
+          if (auto transpose = tiledB.getDefiningOp<MemDescWGMMAViewOp>())
+            tiledB = transpose.getSrc();
+          if (ExactSMEMStage stage = getExactSMEMStage(tiledB)) {
+            dot->setDiscardableAttr(kTleTiledSMEMOperandBAttr,
+                                    builder.getUnitAttr());
+            dot->setDiscardableAttr(kTleTiledSMEMLogicalRowsAttr,
+                                    builder.getI32IntegerAttr(stage.getRows()));
+            dot->setDiscardableAttr(kTleTiledSMEMLogicalColsAttr,
+                                    builder.getI32IntegerAttr(stage.getCols()));
+            dot->setDiscardableAttr(
+                kTleTiledSMEMStorageTileShapeAttr,
+                builder.getDenseI32ArrayAttr(
+                    {static_cast<int32_t>(stage.getStorageTileRows()),
+                     static_cast<int32_t>(stage.getStorageTileCols())}));
+          }
+          if (ExactSMEMStage stage = getExactSMEMStage(wgmma.getB())) {
+            auto storage = SMEMLayoutPlan::fromAttr(
+                stage.root.alloc->getAttrOfType<DictionaryAttr>(kSMEMPlanAttr));
+            if (!storage)
+              storage.emplace(
+                  ArrayRef<int64_t>{stage.getRows(), stage.getCols()},
+                  ArrayRef<int64_t>{stage.getStorageTileRows(),
+                                    stage.getStorageTileCols()},
+                  cast<ttg::NVMMASharedEncodingAttr>(
+                      stage.atom.getType().getEncoding()));
+            auto mma = cast<ttg::NvidiaMmaEncodingAttr>(mmaType.getEncoding());
+            unsigned n = activeN ? activeN.getInt() : mma.getInstrShape()[1];
+            auto operandPlan = planWGMMAOperand(
+                *storage, stage.transposed, mma.getInstrShape()[2], n,
+                storage->encoding.getElementBitWidth() == 8 &&
+                    stage.atom.getType().getElementType().isInteger(8));
+            if (!operandPlan) {
+              wgmma.emitOpError(
+                  "no WGMMA descriptor covers the planned shared layout");
+              failed = true;
+              return;
+            }
+            dot->setAttr(kWGMMAOperandBPlanAttr, operandPlan->getAttr());
+          }
+          encodedAccs[wgmma.getD()] = dot.getD();
           for (OpOperand &use :
                llvm::make_early_inc_range(wgmma.getD().getUses()))
-            convertLoopCarriedAccumulator(use, nativeDot.getD(), encodedAccs);
+            convertLoopCarriedAccumulator(use, dot.getD(), encodedAccs);
           continue;
         }
 

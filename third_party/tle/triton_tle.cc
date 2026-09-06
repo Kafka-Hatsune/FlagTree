@@ -41,6 +41,7 @@
 #include "pybind11/pytypes.h"
 #include "pybind11/stl.h"
 #include "tle/dialect/include/IR/Dialect.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/IR/VerifyUtils.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -329,6 +330,12 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, Type resultType, Value src,
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
+           })
+      .def("create_memdesc_wgmma_view",
+           [](TritonOpBuilder &self, Type resultType, Value src,
+              std::vector<int32_t> order) -> Value {
+             return self.create<tle::MemDescWGMMAViewOp>(resultType, src,
+                                                         order);
            })
       .def("create_memdesc_trans",
            [](TritonOpBuilder &self, Value src,
@@ -975,9 +982,8 @@ void init_triton_tle(py::module &&m) {
   // load dialects
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
-    // TODO: move our td defines here
-    // registry.insert<mlir::triton::tle::tleDialect>();
-    // context.appendDialectRegistry(registry);
+    registry.insert<mlir::triton::tle::TleDialect>();
+    context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
 

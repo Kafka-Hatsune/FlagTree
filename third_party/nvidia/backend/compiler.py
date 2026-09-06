@@ -338,6 +338,8 @@ class CUDABackend(BaseBackend):
         # end flagtree tle
         passes.ttgpuir.add_accelerate_matmul(pm)
         tle.passes.add_lower_wgmma(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
         # flagtree pass: merge segmented dot chains whose operands are proven
         # ordered slices of one wider operand. Runs after accelerate-matmul so
         # the mma layout is known, and before remove-layout-conversions so the
