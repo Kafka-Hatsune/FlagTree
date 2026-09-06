@@ -28,6 +28,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "tle/dialect/include/IR/ExactSMEM.h"
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "tle/dialect/include/Transforms/TransformAttrs.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -195,6 +196,9 @@ public:
         int sizeInBytes = product(shapePerCTA) *
                           tensorType.getElementType().getIntOrFloatBitWidth() /
                           8;
+        if (auto logicalBytes = op->getAttrOfType<IntegerAttr>(
+                kLogicalTMACopyBytesAttr))
+          sizeInBytes = static_cast<int>(logicalBytes.getInt());
 
         rewriter.create<triton::nvidia_gpu::BarrierExpectOp>(loc, mbarrierAlloc,
                                                              sizeInBytes, pred);
