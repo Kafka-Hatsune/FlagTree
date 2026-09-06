@@ -321,22 +321,25 @@ def _attn_fwd_tle_ws_pipelined_pingpong_persistent(
     THREADS_IN_MMA_GROUPS: tl.constexpr = NUM_MMA_WARPS * 32
 
     q_smem = tle.gpu.alloc(
-        [Q_STAGE_CAPACITY, BM_SPLIT, HEAD_DIM],
+        [BM_SPLIT, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
+        capacity=Q_STAGE_CAPACITY,
     )
     k_smem = tle.gpu.alloc(
-        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
+        [BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
+        capacity=KV_STAGE_CAPACITY,
     )
     v_smem = tle.gpu.alloc(
-        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
+        [BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
+        capacity=KV_STAGE_CAPACITY,
     )
     q_empties = tle.gpu.alloc_barriers(num_barriers=Q_STAGE_CAPACITY, arrive_count=1, init=tle.gpu.READY)
     q_fulls = tle.gpu.alloc_barriers(
@@ -516,10 +519,17 @@ def tle_attention(
         m = m_out
     y_dim = z * h * n_ctx
     block_m_split = block_m // num_mma_groups
+    kv_descriptor_block = [block_n, head_dim]
+    if block_n & (block_n - 1):
+        if block_n % 16 != 0:
+            raise ValueError("fragmented K/V blocks require BLOCK_N%16 == 0")
+        # Split only the fragment axis. TMA lowering derives and emits any
+        # smaller hardware transaction boxes for this complete storage tile.
+        kv_descriptor_block = [block_n & -block_n, head_dim]
 
     desc_q = TensorDescriptor(q, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_m_split, head_dim])
-    desc_k = TensorDescriptor(k, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_n, head_dim])
-    desc_v = TensorDescriptor(v, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_n, head_dim])
+    desc_k = TensorDescriptor(k, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=kv_descriptor_block)
+    desc_v = TensorDescriptor(v, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=kv_descriptor_block)
     desc_o = TensorDescriptor(o, shape=[y_dim, head_dim], strides=[head_dim, 1], block_shape=[block_m_split, head_dim])
 
     num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
