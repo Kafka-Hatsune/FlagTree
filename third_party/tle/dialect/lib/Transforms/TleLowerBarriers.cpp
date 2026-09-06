@@ -29,6 +29,7 @@
 #include "tle/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 
 namespace mlir::triton::tle {
@@ -92,6 +93,15 @@ static BarrierAllocOp findBarrierAlloc(Value value) {
   return {};
 }
 
+// Participant TLE mbarrier arrivals have logical warp-partition semantics:
+// every thread in the partition contributes a unit arrival. lookupNumWarps
+// handles both the default warp-specialize region (the module's ttg.num-warps)
+// and a worker partition (its partition-specific num_warps).
+static int64_t getPartitionThreadCount(Operation *op, ModuleOp module) {
+  return static_cast<int64_t>(ttg::lookupNumWarps(op)) *
+         ttg::TritonGPUDialect::getThreadsPerWarp(module);
+}
+
 #if !defined(__HCU__)
 static std::pair<Value, Value>
 createNamedBarrierOperands(OpBuilder &builder, Location loc, Operation *op) {
@@ -128,18 +138,71 @@ struct TritonTleLowerBarriers
     // allocation lowering emits an mbarrier.init into unrelated shared memory.
     llvm::DenseSet<Operation *> namedAllocs;
     llvm::DenseSet<Operation *> mbarrierAllocs;
-    auto recordBackend = [&](Operation *op, Value barrier) {
+    auto recordBackend = [&](Operation *op, Value barrier) -> LogicalResult {
       auto alloc = findBarrierAlloc(barrier);
       if (!alloc)
-        return;
+        return success();
       StringRef backend = op->getAttrOfType<StringAttr>("backend").getValue();
+      if (backend == "named" && alloc.getArrivalMode() == "participant") {
+        op->emitError("arrival_mode 'participant' does not support the named "
+                      "barrier backend");
+        return failure();
+      }
       (backend == "named" ? namedAllocs : mbarrierAllocs)
           .insert(alloc.getOperation());
+      return success();
     };
-    for (BarrierWaitOp op : waits)
-      recordBackend(op.getOperation(), op.getBarrier());
-    for (BarrierArriveOp op : arrives)
-      recordBackend(op.getOperation(), op.getBarrier());
+    for (BarrierWaitOp op : waits) {
+      if (failed(recordBackend(op.getOperation(), op.getBarrier()))) {
+        signalPassFailure();
+        return;
+      }
+    }
+    for (BarrierArriveOp op : arrives) {
+      if (failed(recordBackend(op.getOperation(), op.getBarrier()))) {
+        signalPassFailure();
+        return;
+      }
+    }
+
+    // A TLE BarrierAllocOp stores a logical expected-arrival count. Direct
+    // phase-indexed participant arrivals require initialization with
+    // logical_count * partition_threads. Elected and transaction/TMA barriers
+    // retain their logical count.
+    llvm::DenseMap<Operation *, int64_t> participantWidths;
+    for (BarrierArriveOp op : arrives) {
+      StringRef backend = op->getAttrOfType<StringAttr>("backend").getValue();
+      if (backend != "mbarrier")
+        continue;
+
+      BarrierAllocOp alloc = findBarrierAlloc(op.getBarrier());
+      if (!alloc) {
+        op.emitOpError("cannot resolve direct mbarrier arrival mode from its "
+                       "TLE barrier allocation");
+        signalPassFailure();
+        return;
+      }
+      if (alloc.getExpectBytesAttr()) {
+        op.emitOpError("direct arrival cannot target a TMA transaction "
+                       "barrier allocated with expect_bytes");
+        signalPassFailure();
+        return;
+      }
+      if (alloc.getArrivalMode() != "participant")
+        continue;
+
+      int64_t width = getPartitionThreadCount(op.getOperation(), module);
+      auto [it, inserted] =
+          participantWidths.try_emplace(alloc.getOperation(), width);
+      if (!inserted && it->second != width) {
+        op.emitOpError("all direct arrivals for one barrier allocation must "
+                       "execute in partitions with the same thread count; "
+                       "previous width was ")
+            << it->second << ", current width is " << width;
+        signalPassFailure();
+        return;
+      }
+    }
 
     for (BarrierWaitOp op : waits) {
       OpBuilder builder(op);
@@ -168,9 +231,20 @@ struct TritonTleLowerBarriers
       Location loc = op.getLoc();
       StringRef backend = op->getAttrOfType<StringAttr>("backend").getValue();
       if (backend == "mbarrier") {
-        int64_t count = getI32Attr(op.getOperation(), "arrive_count");
-        builder.create<ttng::ArriveBarrierOp>(loc, op.getBarrier(),
-                                              static_cast<uint32_t>(count));
+        int64_t logicalCount = getI32Attr(op.getOperation(), "arrive_count");
+        BarrierAllocOp alloc = findBarrierAlloc(op.getBarrier());
+        if (alloc.getArrivalMode() == "participant") {
+          int64_t participantCount = participantWidths.lookup(alloc);
+          for (int64_t i = 0; i < logicalCount; ++i) {
+            auto arrive = builder.create<ttng::ArriveBarrierOp>(
+                loc, op.getBarrier(), static_cast<uint32_t>(participantCount));
+            arrive.setReleaseFence(true);
+            arrive.setParticipantArrive(true);
+          }
+        } else {
+          builder.create<ttng::ArriveBarrierOp>(
+              loc, op.getBarrier(), static_cast<uint32_t>(logicalCount));
+        }
       } else {
 #if defined(__HCU__)
         op.emitOpError("named barrier lowering is only supported on NVIDIA "
@@ -212,6 +286,10 @@ struct TritonTleLowerBarriers
                        !mbarrierAllocs.contains(op.getOperation());
       int64_t numBarriers = getI32Attr(op.getOperation(), "num_barriers");
       int64_t arriveCount = getI32Attr(op.getOperation(), "arrive_count");
+      if (auto it = participantWidths.find(op.getOperation());
+          it != participantWidths.end()) {
+        arriveCount *= it->second;
+      }
       if (!namedOnly) {
         for (int64_t i = 0; i < numBarriers; ++i) {
           Value slot = createBarrierSlot(builder, loc, alloc, i);
