@@ -916,6 +916,8 @@ void init_triton_tle_passes(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_lower_async_load",
                      tle::createTritonTleLowerAsyncLoad);
   ADD_PASS_WRAPPER_0("add_lower_wgmma", tle::createTritonTleLowerWGMMA);
+  ADD_PASS_WRAPPER_0("add_plan_logical_domains",
+                     tle::createTritonTlePlanLogicalDomains);
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
   ADD_PASS_WRAPPER_0("add_lower_barriers", tle::createTritonTleLowerBarriers);
