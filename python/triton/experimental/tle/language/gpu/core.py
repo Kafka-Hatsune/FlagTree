@@ -1137,6 +1137,16 @@ def copy(
 
         Masked global -> local copy with zero fill:
             tle.copy(global_ptrs, local_buf, [64, 128], mask=valid)
+
+        Logical tensor-descriptor -> automatic exact tiled stage:
+            local_buf = tle.alloc(
+                [80, 256],
+                dtype=tl.float16,
+                scope=tle.smem,
+                capacity=1,
+            )
+            stage = local_buf.slot(0)
+            tle.copy(desc_16x256, stage, [80, 256], [0, 0])
     """
     mthreads_enabled = mthreads_common.enabled()
     iluvatar_enabled = iluvatar_copy.enabled()
@@ -1259,12 +1269,25 @@ def copy(
             barrier_slot = _tma_completion_barrier_slot(barrier, _semantic)
             expect_bytes = barrier_slot.expect_bytes
 
-        # Note: Skip shape assertion at this level since it requires _semantic context
-        # assert desc.shape == shape, "Shape mismatch between descriptor and provided shape"
+        # Only logical descriptors need the extra copy-shape contract.
+        # Ordinary TMA copies keep using the existing builder overload.
+        copy_shape_args = ()
+        if isinstance(desc, tle._logical_tensor_descriptor):
+            shape = [int(tl._unwrap_if_constexpr(dim)) for dim in shape]
+            if shape != list(desc.block_shape):
+                raise ValueError("TMA copy shape must match descriptor.block_shape; "
+                                 "declare the full logical block in the descriptor")
+            copy_shape_args = (shape, )
         assert len(offsets) == len(desc.shape), "Offsets and shape must have the same length"
         offsets = _semantic._convert_to_ir_values(offsets, require_i64=False)
-        _semantic.builder.create_tma_copy(src.handle, dst.handle, offsets,
-                                          None if barrier_slot is None else barrier_slot.handle, expect_bytes)
+        _semantic.builder.create_tma_copy(
+            src.handle,
+            dst.handle,
+            offsets,
+            None if barrier_slot is None else barrier_slot.handle,
+            expect_bytes,
+            *copy_shape_args,
+        )
         return
 
     # Parameter validation

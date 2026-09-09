@@ -319,6 +319,8 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
   exactAlloc->setAttr(kSMEMPlanAttr, storagePlan.getAttr());
   int64_t alignment =
       std::max<int64_t>(16, storageTileEncoding.getSwizzlingByteWidth() * 8);
+  if (!action.copies.empty())
+    alignment = std::max<int64_t>(128, alignment);
   if (IntegerAttr oldAlignment = oldAlloc.getAlignmentAttr())
     alignment = std::max(alignment, oldAlignment.getInt());
   exactAlloc.setAlignmentAttr(builder.getI32IntegerAttr(alignment));
@@ -385,6 +387,63 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
                             ArrayRef<int64_t>(action.logicalShape).drop_front(),
                             fragmentAxis);
 
+  for (ttg::TMACopyOp copy : action.copies) {
+    OpBuilder copyBuilder(copy);
+    ExactSMEMStage stage = getExactSMEMStage(copy.getDst());
+    assert(stage && "validated logical TMA destination must be a stage view");
+    auto stageType = stage.getType();
+#ifndef __HCU__
+    auto expectBytes = copy.getExpectBytesAttr();
+#endif
+    auto storageTileType = ttg::MemDescType::get(
+        storageTileShape, stageType.getElementType(),
+        stage.atom.getType().getEncoding(), stageType.getMemorySpace(),
+        stageType.getMutableMemory(), storageTileShape);
+    for (int64_t rowTile = 0; rowTile < rowTiles; ++rowTile) {
+      for (int64_t colTile = 0; colTile < colTiles; ++colTile) {
+        int64_t tile = fragmentAxis == 0 ? colTile * rowTiles + rowTile
+                                         : rowTile * colTiles + colTile;
+        Value flatIndex =
+            addOffset(copyBuilder, copy.getLoc(), stage.atom.getIndex(), tile);
+        auto storageTile = ttg::MemDescIndexOp::create(
+            copyBuilder, copy.getLoc(), storageTileType, stage.atom.getSrc(),
+            flatIndex);
+        storageTile->setAttr(kExactSMEMTileAttr,
+                             copyBuilder.getI32IntegerAttr(tile));
+        SmallVector<Value> indices(copy.getIndices().begin(),
+                                   copy.getIndices().end());
+        unsigned rowCoordinate = indices.size() - 2;
+        unsigned colCoordinate = indices.size() - 1;
+        indices[rowCoordinate] =
+            addOffset(copyBuilder, copy.getLoc(), indices[rowCoordinate],
+                      rowTile * storageTileRows);
+        indices[colCoordinate] =
+            addOffset(copyBuilder, copy.getLoc(), indices[colCoordinate],
+                      colTile * storageTileCols);
+#ifdef __HCU__
+        auto tiledCopy = ttg::TMACopyOp::create(
+            copyBuilder, copy.getLoc(), copy.getSrc(), storageTile, indices);
+#else
+        auto tiledCopy = ttg::TMACopyOp::create(
+            copyBuilder, copy.getLoc(), copy.getSrc(), storageTile, indices,
+            copy.getBarrier(), expectBytes);
+        // One logical copy contributes one arrival and its full byte count.
+        // Continuation tiles complete the same barrier without another arrival.
+        if (copy.getBarrier())
+          expectBytes = copyBuilder.getI32IntegerAttr(0);
+#endif
+        int64_t elementBytes =
+            oldType.getElementType().getIntOrFloatBitWidth() / 8;
+        tiledCopy->setAttr(
+            kLogicalTMACopyBytesAttr,
+            copyBuilder.getI64IntegerAttr(storageTileRows * storageTileCols *
+                                          elementBytes));
+      }
+    }
+  }
+
+  for (ttg::TMACopyOp copy : action.copies)
+    copy.erase();
   for (ttg::MemDescIndexOp stage : action.stages)
     stage.erase();
   oldAlloc.erase();
@@ -406,6 +465,23 @@ struct TritonTlePlanLogicalDomains
 
 void applyLogicalDomainPlan(LogicalDomainPlan &&plan) {
   markPlannedInputTiles(plan);
+  for (const auto &[value, descriptor] : plan.descriptors) {
+    const auto &action =
+        plan.descriptorRewrites.find(descriptor.provenance.primaryRoot())
+            ->second;
+    auto oldType = cast<triton::TensorDescType>(value.getType());
+    auto oldBlock = oldType.getBlockType();
+    auto block = RankedTensorType::get(
+        action.blockShape, oldBlock.getElementType(), oldBlock.getEncoding());
+    Value rewritten = value;
+    rewritten.setType(triton::TensorDescType::get(value.getContext(), block));
+  }
+  for (const auto &[source, action] : plan.descriptorRewrites) {
+    OpBuilder builder(source);
+    source->removeAttr("tle.logical_descriptor_shape");
+    source->setAttr("tle.tma_box_shape",
+                    builder.getDenseI64ArrayAttr(action.boxShape));
+  }
   for (LogicalRootRewriteAction &root : plan.roots)
     applyRootRewrite(root);
   applyLogicalTensorActions(plan);

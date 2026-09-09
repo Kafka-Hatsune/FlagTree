@@ -174,6 +174,18 @@ planWGMMAOperand(const SMEMLayoutPlan &storage, bool viewTransposed,
     return viewTransposed ? storage.offsetBeforeSwizzle(n, k)
                           : storage.offsetBeforeSwizzle(k, n);
   };
+  // NVMMAShared uses row-major storage for swizzle=0. A wide row-major
+  // tile does not necessarily contain WGMMA's interleaved core, even when
+  // all core origins fit LBO/SBO. Prove the core interior as well.
+  for (int64_t k = 0; k < coreK; ++k)
+    for (int64_t n = 0; n < coreN; ++n) {
+      int64_t coreOffset = coreInv
+                               .apply({{coreDims[0], bIsKMajor ? n : k},
+                                       {coreDims[1], bIsKMajor ? k : n}})[0]
+                               .second;
+      if (address(k, n) != coreOffset * storage.elementBytes())
+        return std::nullopt;
+    }
   int64_t strideK = address(coreK, 0);
   int64_t strideN = address(0, coreN);
   int64_t lbo = bIsKMajor ? strideK : strideN;

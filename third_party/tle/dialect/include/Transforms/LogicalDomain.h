@@ -55,6 +55,16 @@ struct TensorFragmentState {
   LogicalDomainProvenance provenance;
 };
 
+struct TensorDescriptorLogicalState {
+  LogicalShape logicalShape;
+  LogicalDomainProvenance provenance;
+};
+
+struct LogicalDescriptorRewriteAction {
+  LogicalShape blockShape;
+  LogicalShape boxShape;
+};
+
 enum class LogicalReductionIdentity : uint8_t {
   NegativeInfinity,
   PositiveInfinity,
@@ -86,6 +96,7 @@ struct LogicalRootRewriteAction {
   SmallVector<gpu::LocalStoreOp> localStores;
   SmallVector<gpu::MemDescIndexOp> stages;
   SmallVector<gpu::MemDescTransOp> transposes;
+  SmallVector<gpu::TMACopyOp> copies;
   SmallVector<LogicalPointerCopyAction> pointerCopies;
   SmallVector<LogicalMemDescUseAction> memdescUses;
   bool reachesWGMMA = false;
@@ -129,6 +140,8 @@ struct LogicalDomainPlan {
   SmallVector<LogicalFragmentGuardAction, 4> guards;
   DenseMap<Value, MemDescLogicalState> memdescs;
   DenseMap<Value, TensorFragmentState> tensors;
+  DenseMap<Value, TensorDescriptorLogicalState> descriptors;
+  DenseMap<Operation *, LogicalDescriptorRewriteAction> descriptorRewrites;
 };
 
 FailureOr<SmallVector<int64_t, 2>>

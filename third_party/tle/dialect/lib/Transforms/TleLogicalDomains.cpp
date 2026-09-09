@@ -14,6 +14,9 @@
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#ifndef __HCU__
+#include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
+#endif
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -31,6 +34,8 @@ constexpr llvm::StringLiteral kLogicalAllocShape("tle.logical_alloc_shape");
 constexpr llvm::StringLiteral
     kLogicalNonPowerAxis("tle.logical_non_power_axis");
 constexpr llvm::StringLiteral kStoragePlan("tle.storage_plan");
+constexpr llvm::StringLiteral
+    kLogicalDescriptorShape("tle.logical_descriptor_shape");
 
 static RankedTensorType getTensorType(Value value) {
   return dyn_cast<RankedTensorType>(value.getType());
@@ -315,6 +320,7 @@ public:
   explicit LogicalDomainContext(LogicalDomainPlan &plan);
 
   const MemDescLogicalState *lookupMemDesc(Value value) const;
+  const TensorDescriptorLogicalState *lookupDescriptor(Value value) const;
   const TensorFragmentState *lookupTensor(Value value) const;
   bool mergeMemDesc(Value value, const MemDescLogicalState &state);
   bool hasRestrictedOperand(Operation *op) const;
@@ -322,6 +328,7 @@ public:
 
   LogicalResult processCandidateAlloc(Operation *op, LogicalDomainPhase phase);
   LogicalResult processMemDescIndex(Operation *op, LogicalDomainPhase phase);
+  LogicalResult processLogicalTMACopy(Operation *op, LogicalDomainPhase phase);
   LogicalResult processLogicalPointerCopy(Operation *op,
                                           LogicalDomainPhase phase);
   LogicalResult processLocalStore(Operation *op, LogicalDomainPhase phase);
@@ -357,7 +364,9 @@ private:
 
 enum class LogicalBehavior : uint8_t {
   CandidateAlloc,
+  CandidateDescriptor,
   MemDescIndex,
+  LogicalTMACopy,
   LogicalPointerCopy,
   LocalStore,
   ExtractStage,
@@ -392,10 +401,14 @@ static LogicalResult dispatchLogicalBehavior(LogicalDomainContext &context,
                                              LogicalDomainPhase phase,
                                              LogicalBehavior behavior) {
   switch (behavior) {
+  case LogicalBehavior::CandidateDescriptor:
+    return success();
   case LogicalBehavior::CandidateAlloc:
     return context.processCandidateAlloc(op, phase);
   case LogicalBehavior::MemDescIndex:
     return context.processMemDescIndex(op, phase);
+  case LogicalBehavior::LogicalTMACopy:
+    return context.processLogicalTMACopy(op, phase);
   case LogicalBehavior::LogicalPointerCopy:
     return context.processLogicalPointerCopy(op, phase);
   case LogicalBehavior::LocalStore:
@@ -462,10 +475,11 @@ static LogicalResult dispatchLogicalBehavior(LogicalDomainContext &context,
   llvm_unreachable("unknown logical-domain behavior");
 }
 
-/// A shared SSA lattice for tensor domains and descriptor views. Full denotes
-/// the ordinary carrier contract; Fragment and MemDesc retain explicit logical
-/// domains. Memory initialization/alias effects are validated separately.
-/// Unsupported transfers and incompatible control-flow joins never become Full.
+/// A shared SSA lattice for tensors, SMEM views and tensor descriptors. Full
+/// denotes the ordinary carrier contract; the other facts retain explicit
+/// logical domains. Memory initialization/alias effects are validated
+/// separately. Unsupported transfers and incompatible control-flow joins never
+/// become Full.
 class LogicalDomainFact {
 public:
   enum class Kind : uint8_t {
@@ -473,6 +487,7 @@ public:
     Full,
     Fragment,
     MemDesc,
+    Descriptor,
     Conflict
   };
 
@@ -544,6 +559,19 @@ public:
     return memdesc;
   }
 
+  static LogicalDomainFact
+  getDescriptor(const TensorDescriptorLogicalState &state) {
+    LogicalDomainFact fact;
+    fact.kind = Kind::Descriptor;
+    fact.descriptor = state;
+    return fact;
+  }
+  bool isDescriptor() const { return kind == Kind::Descriptor; }
+  const TensorDescriptorLogicalState &getDescriptor() const {
+    assert(isDescriptor());
+    return descriptor;
+  }
+
   Kind getKind() const { return kind; }
   bool isFragment() const { return kind == Kind::Fragment; }
   const TensorFragmentState &getState() const {
@@ -565,6 +593,13 @@ public:
     if (lhs.kind == Kind::Full)
       return lhs;
     LogicalDomainFact result = lhs;
+    if (lhs.kind == Kind::Descriptor) {
+      if (lhs.descriptor.logicalShape != rhs.descriptor.logicalShape)
+        return getConflict();
+      result.descriptor.provenance =
+          mergeProvenance(lhs.descriptor.provenance, rhs.descriptor.provenance);
+      return result;
+    }
     if (lhs.kind == Kind::MemDesc) {
       const auto &a = lhs.memdesc;
       const auto &b = rhs.memdesc;
@@ -587,6 +622,10 @@ public:
   bool operator==(const LogicalDomainFact &other) const {
     if (kind != other.kind)
       return false;
+    if (kind == Kind::Descriptor)
+      return descriptor.logicalShape == other.descriptor.logicalShape &&
+             descriptor.provenance.roots == other.descriptor.provenance.roots &&
+             descriptor.provenance.seeds == other.descriptor.provenance.seeds;
     if (kind == Kind::MemDesc)
       return memdesc.physicalShape == other.memdesc.physicalShape &&
              memdesc.logicalShape == other.memdesc.logicalShape &&
@@ -616,6 +655,11 @@ public:
       llvm::interleaveComma(memdesc.logicalShape, os);
       os << ">";
       return;
+    case Kind::Descriptor:
+      os << "tensor_descriptor<";
+      llvm::interleaveComma(descriptor.logicalShape, os);
+      os << ">";
+      return;
     case Kind::Conflict:
       os << "conflict";
       return;
@@ -631,6 +675,7 @@ private:
   Kind kind = Kind::Uninitialized;
   TensorFragmentState state;
   MemDescLogicalState memdesc;
+  TensorDescriptorLogicalState descriptor;
 };
 
 using LogicalDomainLattice = dataflow::Lattice<LogicalDomainFact>;
@@ -1008,6 +1053,28 @@ struct LogicalDomainModel {
   FailureOr<SmallVector<LogicalDomainFact, 2>>
   infer(Operation *op, ArrayRef<const LogicalDomainLattice *> operands) const {
     switch (behavior) {
+    case LogicalBehavior::CandidateDescriptor: {
+      auto shape =
+          op->getAttrOfType<DenseI64ArrayAttr>(kLogicalDescriptorShape);
+      if (!shape)
+        return SmallVector<LogicalDomainFact, 2>{LogicalDomainFact::getFull()};
+      auto block = cast<triton::MakeTensorDescOp>(op).getType().getBlockType();
+      ArrayRef<int64_t> logical = shape.asArrayRef();
+      if (logical.size() < 2 ||
+          !validatePrefixShape(block.getShape(), logical) ||
+          llvm::any_of(logical.drop_back(2),
+                       [](int64_t dim) { return dim != 1; }) ||
+          llvm::count_if(
+              logical, [](int64_t dim) { return !llvm::isPowerOf2_64(dim); }) !=
+              1 ||
+          llvm::any_of(logical.take_back(2),
+                       [](int64_t dim) { return dim % 16; })) {
+        op->emitOpError("invalid TLE logical descriptor block shape");
+        return failure();
+      }
+      return SmallVector<LogicalDomainFact, 2>{LogicalDomainFact::getDescriptor(
+          {LogicalShape(logical), LogicalDomainProvenance(op, op)})};
+    }
     case LogicalBehavior::CandidateAlloc:
     case LogicalBehavior::MemDescIndex:
     case LogicalBehavior::MemDescTranspose: {
@@ -1042,7 +1109,7 @@ struct LogicalDomainModel {
     case LogicalBehavior::RejectScan: {
       bool restricted = llvm::any_of(operands, [](const auto *lattice) {
         const auto &fact = lattice->getValue();
-        return fact.isFragment() || fact.isMemDesc();
+        return fact.isFragment() || fact.isMemDesc() || fact.isDescriptor();
       });
       return SmallVector<LogicalDomainFact, 2>(
           op->getNumResults(), restricted ? LogicalDomainFact::getConflict()
@@ -1090,7 +1157,7 @@ public:
     auto model = getLogicalDomainModel(op);
     bool restricted = llvm::any_of(operands, [](const auto *lattice) {
       const auto &fact = lattice->getValue();
-      return fact.isFragment() || fact.isMemDesc();
+      return fact.isFragment() || fact.isMemDesc() || fact.isDescriptor();
     });
     if (conflict || (!model && restricted)) {
       for (auto *result : results)
@@ -1138,6 +1205,11 @@ LogicalDomainContext::lookupMemDesc(Value value) const {
   auto it = plan.memdescs.find(value);
   return it == plan.memdescs.end() ? nullptr : &it->second;
 }
+const TensorDescriptorLogicalState *
+LogicalDomainContext::lookupDescriptor(Value value) const {
+  auto it = plan.descriptors.find(value);
+  return it == plan.descriptors.end() ? nullptr : &it->second;
+}
 const TensorFragmentState *
 LogicalDomainContext::lookupTensor(Value value) const {
   auto it = plan.tensors.find(value);
@@ -1152,7 +1224,8 @@ bool LogicalDomainContext::mergeMemDesc(Value value,
 
 bool LogicalDomainContext::hasRestrictedOperand(Operation *op) const {
   return llvm::any_of(op->getOperands(), [&](Value value) {
-    return lookupTensor(value) || lookupMemDesc(value);
+    return lookupTensor(value) || lookupMemDesc(value) ||
+           lookupDescriptor(value);
   });
 }
 
@@ -1341,6 +1414,70 @@ LogicalDomainContext::processMemDescIndex(Operation *operation,
       return emitError(index, 0, "candidate root has no storage action");
     if (!llvm::is_contained(root->stages, index))
       root->stages.push_back(index);
+  }
+  return success();
+}
+
+LogicalResult
+LogicalDomainContext::processLogicalTMACopy(Operation *operation,
+                                            LogicalDomainPhase phase) {
+  auto copy = cast<ttg::TMACopyOp>(operation);
+  for (auto [index, operand] : llvm::enumerate(operation->getOperands())) {
+    const MemDescLogicalState *state = lookupMemDesc(operand);
+    if (!state)
+      continue;
+    if (index != 1)
+      return emitError(copy, index,
+                       "logical TMA supports only global-to-SMEM direction");
+#ifndef __HCU__
+    if (copy.getBarrier()) {
+      auto expectBytes = copy.getExpectBytesAttr();
+      if (!expectBytes || expectBytes.getInt() <= 0)
+        return emitError(copy, index,
+                         "explicit completion barrier requires positive "
+                         "expect_bytes");
+    }
+#endif
+    auto descType = dyn_cast<triton::TensorDescType>(copy.getSrc().getType());
+    auto dstType = dyn_cast<ttg::MemDescType>(copy.getDst().getType());
+    if (!descType || !dstType || state->logicalShape.size() != 2 ||
+        dstType.getRank() != 2)
+      return emitError(copy, index,
+                       "logical TMA requires a rank-2 stage and tensor "
+                       "descriptor source");
+    if (!state->isStage || state->viewTransposed ||
+        !copy.getDst().getDefiningOp<ttg::MemDescIndexOp>())
+      return emitError(copy, index,
+                       "logical TMA destination must be a direct stage view");
+    RankedTensorType blockType = descType.getSignlessBlockType();
+    const auto *descriptor = lookupDescriptor(copy.getSrc());
+    if (!descriptor ||
+        ArrayRef<int64_t>(descriptor->logicalShape).take_back(2) !=
+            ArrayRef<int64_t>(state->logicalShape))
+      return emitError(copy, 0,
+                       "descriptor logical block_shape must match the stage; "
+                       "copy.shape cannot enlarge a descriptor block");
+    ArrayRef<int64_t> blockShape = descriptor->logicalShape;
+    auto logical =
+        copy->getAttrOfType<DenseI64ArrayAttr>(kLogicalCopyShapeAttr);
+    if (!logical || logical.asArrayRef() != blockShape)
+      return emitError(copy, index,
+                       "copy shape must match descriptor logical block_shape");
+    if (copy.getIndices().size() != blockShape.size())
+      return emitError(copy, index,
+                       "logical TMA coordinate count must match descriptor "
+                       "rank");
+    if (blockType.getElementType() != dstType.getElementType())
+      return emitError(copy, index,
+                       "logical TMA source and destination element types "
+                       "must match");
+    if (phase == LogicalDomainPhase::Plan) {
+      auto *root = findRootAction(plan, state->provenance.primaryRoot());
+      if (!root)
+        return emitError(copy, index, "candidate root has no storage action");
+      if (!llvm::is_contained(root->copies, copy))
+        root->copies.push_back(copy);
+    }
   }
   return success();
 }
@@ -2005,7 +2142,8 @@ LogicalResult LogicalDomainContext::processRejected(Operation *operation,
   if (phase == LogicalDomainPhase::Propagate)
     return success();
   for (auto [index, operand] : llvm::enumerate(operation->getOperands()))
-    if (lookupTensor(operand) || lookupMemDesc(operand))
+    if (lookupTensor(operand) || lookupMemDesc(operand) ||
+        lookupDescriptor(operand))
       return emitError(operation, index, reason);
   return success();
 }
@@ -2015,11 +2153,15 @@ namespace {
 static std::optional<LogicalBehavior>
 getExplicitLogicalBehavior(Operation *op) {
   return llvm::TypeSwitch<Operation *, std::optional<LogicalBehavior>>(op)
+      .Case<triton::MakeTensorDescOp>(
+          [](auto) { return LogicalBehavior::CandidateDescriptor; })
       .Case<ttg::LocalAllocOp>(
           [](auto) { return LogicalBehavior::CandidateAlloc; })
       .Case<ttg::LocalStoreOp>([](auto) { return LogicalBehavior::LocalStore; })
       .Case<ttg::MemDescIndexOp>(
           [](auto) { return LogicalBehavior::MemDescIndex; })
+      .Case<ttg::TMACopyOp>(
+          [](auto) { return LogicalBehavior::LogicalTMACopy; })
       .Case<LocalPointersOp>([](LocalPointersOp op) {
         return op->hasAttr(kLogicalCopyShapeAttr)
                    ? LogicalBehavior::LogicalPointerCopy
@@ -2155,6 +2297,8 @@ static LogicalResult collectLogicalDomainFacts(ModuleOp module,
       plan.tensors.try_emplace(value, fact.getState());
     else if (fact.isMemDesc())
       plan.memdescs.try_emplace(value, fact.getMemDesc());
+    else if (fact.isDescriptor())
+      plan.descriptors.try_emplace(value, fact.getDescriptor());
   };
 
   module.walk([&](Operation *op) {
@@ -2170,6 +2314,20 @@ static LogicalResult collectLogicalDomainFacts(ModuleOp module,
 
 static LogicalResult planOperation(LogicalDomainContext &context,
                                    Operation *op) {
+  for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
+    if (!context.lookupDescriptor(operand))
+      continue;
+    if (isa<ttg::TMACopyOp>(op) && index == 0 &&
+        context.lookupMemDesc(op->getOperand(1)))
+      continue;
+    if (isa<ttg::WarpSpecializeOp>(op) ||
+        isForwardedControlFlowOperand(op, index))
+      continue;
+    return context.emitError(
+        op, index,
+        "logical tensor descriptors currently require a TLE "
+        "global-to-SMEM copy into a logical stage");
+  }
   if (!context.hasRestrictedOperand(op))
     return success();
 
@@ -2184,11 +2342,11 @@ static LogicalResult planOperation(LogicalDomainContext &context,
         op, LogicalDomainPhase::Plan,
         "operation has no logical-domain transfer semantics");
 
-  // SparseForwardDataFlowAnalysis owns RegionBranch/CFG joins.  These ops do
-  // not need a pass-specific model as long as only tensor facts cross them.
+  // SparseForwardDataFlowAnalysis owns RegionBranch/CFG joins for tensor and
+  // tensor-descriptor facts, including their alternative source definitions.
   if (isTensorControlFlow(op)) {
     for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
-      if (!context.lookupTensor(operand))
+      if (!context.lookupTensor(operand) && !context.lookupDescriptor(operand))
         continue;
       if (!isForwardedControlFlowOperand(op, index))
         return context.emitError(
@@ -2209,9 +2367,10 @@ static LogicalResult planOperation(LogicalDomainContext &context,
 // Select after the complete producer/consumer graph is known. In particular,
 // a K/V allocation can feed both a transposed QK and a direct PV descriptor.
 // Neither the first copy nor the first WGMMA may choose its layout alone.
-static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
-                                        LogicalDomainPlan &plan,
-                                        ModuleAxisInfoAnalysis &axisInfo) {
+static LogicalResult
+selectRootSMEMPlan(ArrayRef<LogicalRootRewriteAction *> roots,
+                   LogicalDomainPlan &plan, ModuleAxisInfoAnalysis &axisInfo) {
+  auto &root = *roots.front();
   struct Consumer {
     bool viewTransposed;
     unsigned instructionK, maxN;
@@ -2221,9 +2380,10 @@ static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
   SmallVector<Consumer> consumers;
   plan.module.walk([&](WGMMAOp dot) {
     auto it = plan.memdescs.find(dot.getB());
-    if (it == plan.memdescs.end() ||
-        !llvm::is_contained(it->second.provenance.roots,
-                            root.alloc.getOperation()))
+    if (it == plan.memdescs.end() || llvm::none_of(roots, [&](auto *member) {
+          return llvm::is_contained(it->second.provenance.roots,
+                                    member->alloc.getOperation());
+        }))
       return;
     auto type = cast<ttg::MemDescType>(dot.getB().getType());
     const auto &state = it->second;
@@ -2247,6 +2407,8 @@ static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
   ArrayRef<int64_t> shape = ArrayRef<int64_t>(root.logicalShape).drop_front();
   unsigned fragmentAxis = !llvm::isPowerOf2_64(shape[0]) ? 0 : 1;
   auto preferredTile = root.storageTileShape;
+  bool hasTMA =
+      llvm::any_of(roots, [](auto *member) { return !member->copies.empty(); });
   if ((root.initializer || !root.localStores.empty()) &&
       preferredTile.empty()) {
     auto preferred = selectLogicalSMEMStorageTileShape(stageType, shape);
@@ -2290,6 +2452,10 @@ static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
               carrier.getCTALayout());
           if (!isLegalSMEMTile(shape, tile, encoding))
             continue;
+          // Native TMA loads use a non-transposed shared layout. Its actual
+          // hardware box participates in the same plan as the WGMMA layout.
+          if (hasTMA && storageTransposed)
+            continue;
           SMEMLayoutPlan storage(shape, tile, encoding);
           int64_t instructions = 0;
           bool legal = true;
@@ -2312,26 +2478,53 @@ static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
           }
           if (!legal)
             continue;
+          SmallVector<int64_t> box;
+          if (hasTMA) {
+#ifdef __HCU__
+            continue;
+#else
+            box = triton::nvidia_gpu::getTMABlockShape(encoding, tile, false);
+            if (rows % box[0] || cols % box[1])
+              continue;
+            // TMA writes each box in row-major order before swizzling. Check
+            // its basis against the shared layout selected for WGMMA.
+            for (int64_t row = 1; row < box[0]; row *= 2)
+              legal &= storage.offsetBeforeSwizzle(row, 0) ==
+                       row * box[1] * bits / 8;
+            for (int64_t col = 1; col < box[1]; col *= 2)
+              legal &= storage.offsetBeforeSwizzle(0, col) == col * bits / 8;
+            if (!legal)
+              continue;
+#endif
+          }
           int64_t transactions = 0, waves = 0;
-          for (auto &copy : root.pointerCopies) {
-            unsigned vectorBytes =
-                copyVectorBytes(copy, storageTransposed ? 0 : 1);
-            auto micro = selectLogicalPointerCopyMicroTile(
-                copy.store, tile, encoding, elementType, vectorBytes);
-            transactions += storage.stageBytes() / vectorBytes;
-            waves += shape[0] * shape[1] / (micro[0] * micro[1]);
-          }
-          int64_t initializedStages = root.localStores.size();
-          if (root.initializer)
-            initializedStages += root.logicalShape[0];
-          if (initializedStages) {
-            auto micro = selectLogicalPointerCopyMicroTile(
-                root.alloc, tile, encoding, elementType, 16);
-            transactions += initializedStages * storage.stageBytes() / 16;
-            waves +=
-                initializedStages * shape[0] * shape[1] / (micro[0] * micro[1]);
-          }
           int64_t tiles = shape[0] * shape[1] / (rows * cols);
+          for (auto *member : roots) {
+            for (auto &copy : member->pointerCopies) {
+              unsigned vectorBytes =
+                  copyVectorBytes(copy, storageTransposed ? 0 : 1);
+              auto micro = selectLogicalPointerCopyMicroTile(
+                  copy.store, tile, encoding, elementType, vectorBytes);
+              transactions += storage.stageBytes() / vectorBytes;
+              waves += shape[0] * shape[1] / (micro[0] * micro[1]);
+            }
+            int64_t initializedStages = member->localStores.size();
+            if (member->initializer)
+              initializedStages += member->logicalShape[0];
+            if (initializedStages) {
+              auto micro = selectLogicalPointerCopyMicroTile(
+                  root.alloc, tile, encoding, elementType, 16);
+              transactions += initializedStages * storage.stageBytes() / 16;
+              waves += initializedStages * shape[0] * shape[1] /
+                       (micro[0] * micro[1]);
+            }
+            for (auto copy : member->copies) {
+              int64_t requests = rows * cols / (box[0] * box[1]);
+              int64_t warps = ttg::maybeLookupNumWarps(copy).value_or(4);
+              transactions += tiles * requests;
+              waves += tiles * llvm::divideCeil(requests, warps);
+            }
+          }
           Cost cost{instructions,
                     transactions,
                     waves,
@@ -2352,14 +2545,29 @@ static LogicalResult selectRootSMEMPlan(LogicalRootRewriteAction &root,
   if (!best)
     return root.alloc.emitOpError(
         "no shared layout satisfies all exact-copy and WGMMA consumers");
-  root.storageTileShape = {best->tileRows, best->tileCols};
-  root.storageEncoding = best->encoding;
-  for (auto &copy : root.pointerCopies) {
-    copy.vectorBytes =
-        copyVectorBytes(copy, best->encoding.getTransposed() ? 0 : 1);
-    copy.microTileShape = selectLogicalPointerCopyMicroTile(
-        copy.store, root.storageTileShape, root.storageEncoding, elementType,
-        copy.vectorBytes);
+  for (auto *member : roots) {
+    member->storageTileShape = {best->tileRows, best->tileCols};
+    member->storageEncoding = best->encoding;
+    for (auto &copy : member->pointerCopies) {
+      copy.vectorBytes =
+          copyVectorBytes(copy, best->encoding.getTransposed() ? 0 : 1);
+      copy.microTileShape = selectLogicalPointerCopyMicroTile(
+          copy.store, member->storageTileShape, member->storageEncoding,
+          elementType, copy.vectorBytes);
+    }
+    for (auto copy : member->copies) {
+      const auto &descriptor = plan.descriptors.find(copy.getSrc())->second;
+      LogicalShape block = descriptor.logicalShape;
+      block[block.size() - 2] = best->tileRows;
+      block.back() = best->tileCols;
+#ifndef __HCU__
+      auto box =
+          triton::nvidia_gpu::getTMABlockShape(best->encoding, block, false);
+      for (Operation *source : descriptor.provenance.roots)
+        plan.descriptorRewrites.try_emplace(
+            source, LogicalDescriptorRewriteAction{block, box});
+#endif
+    }
   }
   return success();
 }
@@ -2368,13 +2576,22 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
   LogicalDomainPlan plan;
   plan.module = module;
   SmallVector<ttg::LocalAllocOp> candidates;
+  SmallVector<triton::MakeTensorDescOp> descriptors;
   module.walk([&](Operation *op) {
     if (auto alloc = dyn_cast<ttg::LocalAllocOp>(op)) {
       if (alloc->hasAttr(kStoragePlan) || alloc->hasAttr(kLogicalAllocShape))
         candidates.push_back(alloc);
+    } else if (auto desc = dyn_cast<triton::MakeTensorDescOp>(op)) {
+      if (desc->hasAttr(kLogicalDescriptorShape))
+        descriptors.push_back(desc);
     }
   });
   if (candidates.empty()) {
+    if (!descriptors.empty()) {
+      descriptors.front().emitOpError(
+          "logical descriptor has no planned TLE TMA consumer");
+      return failure();
+    }
     return plan;
   }
   LogicalDomainContext context(plan);
@@ -2410,8 +2627,8 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
       root.alloc->emitOpError("logical domain has no stage views");
       return failure();
     }
-    if ((root.pointerCopies.empty() && root.localStores.empty() &&
-         !root.initializer) ||
+    if ((root.copies.empty() && root.pointerCopies.empty() &&
+         root.localStores.empty() && !root.initializer) ||
         !root.reachesWGMMA) {
       root.alloc->emitOpError(
           "logical domain must reach both an exact producer and WGMMA");
@@ -2419,9 +2636,38 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
     }
   }
   ModuleAxisInfoAnalysis axisInfo(module);
-  for (LogicalRootRewriteAction &root : plan.roots)
-    if (failed(selectRootSMEMPlan(root, plan, axisInfo)))
+  // A descriptor forwarded through CFG joins or captured by multiple producers
+  // must retain one physical block and encoding. Plan all its roots together.
+  SmallVector<unsigned> leaders(plan.roots.size());
+  std::iota(leaders.begin(), leaders.end(), 0);
+  auto leader = [&](unsigned index) {
+    while (leaders[index] != index)
+      index = leaders[index];
+    return index;
+  };
+  DenseMap<Operation *, unsigned> descriptorOwners;
+  for (auto [index, root] : llvm::enumerate(plan.roots))
+    for (auto copy : root.copies)
+      for (Operation *source :
+           plan.descriptors.find(copy.getSrc())->second.provenance.roots) {
+        auto [it, inserted] = descriptorOwners.try_emplace(source, index);
+        if (!inserted)
+          leaders[leader(index)] = leader(it->second);
+      }
+  SmallVector<SmallVector<LogicalRootRewriteAction *>> groups(
+      plan.roots.size());
+  for (auto [index, root] : llvm::enumerate(plan.roots))
+    groups[leader(index)].push_back(&root);
+  for (const auto &group : groups)
+    if (!group.empty() && failed(selectRootSMEMPlan(group, plan, axisInfo)))
       return failure();
+  for (const auto &[value, descriptor] : plan.descriptors)
+    for (Operation *source : descriptor.provenance.roots)
+      if (!plan.descriptorRewrites.count(source)) {
+        source->emitOpError(
+            "logical descriptor has no planned TLE TMA consumer");
+        return failure();
+      }
   return plan;
 }
 

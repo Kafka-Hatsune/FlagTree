@@ -524,6 +524,36 @@ def _layout_from_reshaped_memdesc(handle, shape, element_ty, builder) -> shared_
     raise ValueError(f"unsupported inferred shared-memory reshape encoding: {kind}")
 
 
+class _logical_tensor_descriptor_type(tl.tensor_descriptor_type):
+    """Logical block metadata with the ordinary descriptor IR representation."""
+
+    def __init__(self, carrier_type, logical_shape):
+        super().__init__(carrier_type.block_type, carrier_type.shape_type, carrier_type.strides_type)
+        self.logical_shape = tuple(logical_shape)
+
+    def __eq__(self, other):
+        return super().__eq__(other) and self.logical_shape == other.logical_shape
+
+    def mangle(self):
+        return super().mangle() + "_TLE" + "_".join(map(str, self.logical_shape))
+
+    def _unflatten_ir(self, handles, cursor):
+        descriptor, cursor = super()._unflatten_ir(handles, cursor)
+        return _logical_tensor_descriptor(descriptor, self.logical_shape), cursor
+
+
+class _logical_tensor_descriptor(tl.tensor_descriptor):
+    """Python descriptor exposing a logical block over a power-of-two carrier."""
+
+    def __init__(self, descriptor, logical_shape):
+        super().__init__(descriptor.handle, descriptor.shape.values, descriptor.strides.values, descriptor.block_type)
+        self.type = _logical_tensor_descriptor_type(self.type, logical_shape)
+
+    @property
+    def block_shape(self):
+        return self.type.logical_shape
+
+
 class buffered_tensor(tl.base_value):
     """
     A symbolic type representing a tensor allocated in a manually managed buffer

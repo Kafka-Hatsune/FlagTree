@@ -238,6 +238,14 @@ void init_triton_tle_ir(py::module &&m) {
            [](TritonOpBuilder &self, Type resultTy, Value value) -> Value {
              return self.create<ttg::LocalAllocOp>(resultTy, value);
            })
+      .def("mark_logical_tensor_descriptor",
+           [](TritonOpBuilder &self, Value value,
+              std::vector<int64_t> logicalShape) {
+             cast<triton::MakeTensorDescOp>(value.getDefiningOp())
+                 ->setAttr(
+                     "tle.logical_descriptor_shape",
+                     self.getBuilder().getDenseI64ArrayAttr(logicalShape));
+           })
       .def("mark_logical_alloc_candidate",
            [](TritonOpBuilder &self, Value value,
               std::vector<int64_t> logicalShape, int32_t nonPowerAxis) {
@@ -286,6 +294,29 @@ void init_triton_tle_ir(py::module &&m) {
                                          expectBytesAttr);
 #endif
             return;
+          })
+      .def(
+          "create_tma_copy",
+          [](TritonOpBuilder &self, Value src, Value dst,
+             std::vector<Value> &indices, py::object barrier,
+             int32_t expectBytes, std::vector<int64_t> copyShape) {
+#ifdef __HCU__
+            if (!barrier.is_none() || expectBytes > 0)
+              throw py::value_error(
+                  "TMA completion barrier is only supported on NVIDIA backend");
+            auto op = self.create<ttg::TMACopyOp>(src, dst, indices);
+#else
+             Value barrierValue;
+             if (!barrier.is_none())
+               barrierValue = py::cast<Value>(barrier);
+             IntegerAttr expectBytesAttr;
+             if (expectBytes > 0)
+               expectBytesAttr = self.getBuilder().getI32IntegerAttr(expectBytes);
+             auto op = self.create<ttg::TMACopyOp>(
+                 src, dst, indices, barrierValue, expectBytesAttr);
+#endif
+            op->setAttr(tle::kLogicalCopyShapeAttr,
+                        self.getBuilder().getDenseI64ArrayAttr(copyShape));
           })
       .def("create_local_load",
            [](TritonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
