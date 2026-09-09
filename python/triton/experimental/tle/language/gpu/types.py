@@ -620,11 +620,15 @@ class buffered_tensor(tl.base_value):
         )
 
 
-class buffered_tensor_type(tl.block_type):
+class buffered_tensor_type(tl.base_type):
+    """Type of a memory-backed buffer, represented by a memdesc in IR."""
 
     def __init__(self, element_ty: tl.dtype, shape: List, storage: scope, layout: Optional[shared_layout] = None,
                  semantic: TritonSemantic = None, alloc_shape: List = None):
-        super().__init__(element_ty, shape)
+        self.element_ty = element_ty
+        self.shape = tuple(tl._unwrap_shape(shape))
+        self.numel = math.prod(self.shape)
+        self.name = f"<{self.shape}, {self.element_ty}>"
         # Storage
         self.storage = storage
         # layout encoding
@@ -633,6 +637,17 @@ class buffered_tensor_type(tl.block_type):
         # Buffer number. 0 means a single buffer, 1+ means a buffer array.
         assert semantic, "buffered_tensor array must be created with a builder"
         self.semantic = semantic
+
+    @property
+    def scalar(self):
+        return self.element_ty
+
+    @property
+    def nbytes(self):
+        return self.numel * (self.element_ty.primitive_bitwidth // 8)
+
+    def __repr__(self):
+        return self.__str__()
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[buffered_tensor, int]:
         value = buffered_tensor(handles[cursor], self.scalar, self.shape, self.storage, self.layout, self.semantic,
@@ -666,8 +681,8 @@ class buffered_tensor_type(tl.block_type):
         return f"buffered_tensor_<{self.element_ty}, {self.shape}, {self.layout}, {self.alloc_shape}, >"
 
     def __eq__(self, other) -> bool:
-        if not (type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
-                and self.alloc_shape == other.alloc_shape):
+        if not (type(self) is type(other) and self.element_ty == other.element_ty and self.storage == other.storage and
+                self.shape == other.shape and self.layout == other.layout and self.alloc_shape == other.alloc_shape):
             return False
         self_shard = getattr(self, "_tle_remote_shard_id", None)
         other_shard = getattr(other, "_tle_remote_shard_id", None)
