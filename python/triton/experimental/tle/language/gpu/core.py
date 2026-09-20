@@ -420,6 +420,12 @@ def alloc(
 
     # Map scope to storage (backward compatibility)
     storage = scope
+    payload_shape_for_validation = [tl._unwrap_if_constexpr(dim) for dim in shape]
+    capacity_for_validation = tl._unwrap_if_constexpr(capacity)
+    if (capacity_for_validation is None and storage == tle.smem and not mthreads_common.enabled()
+            and any(isinstance(dim, int) and dim > 0 and dim & (dim - 1)
+                    for dim in payload_shape_for_validation)):
+        raise ValueError("tle.gpu.alloc without capacity requires every SMEM shape dimension to be a power of 2")
     mthreads_auto_sqmma_shared_layout = (mthreads_common.enabled() and storage == tle.smem
                                          and mthreads_wgmma.use_auto_shared_layout(layout, nv_mma_shared_layout))
 
@@ -453,8 +459,11 @@ def alloc(
         if logical_candidate and unwrapped_shape[logical_non_power_axis] % 16 != 0:
             raise ValueError("tle.gpu.alloc non-power-of-two payload dimension must be a multiple of 16")
         if logical_candidate:
-            if storage != tle.smem or mthreads_common.enabled() or iluvatar_copy.enabled():
-                raise ValueError("logical non-power-of-two alloc is supported only by NVIDIA SMEM")
+            from triton._flagtree_backend import get_active_backend_name
+            if get_active_backend_name() != "nvidia":
+                raise ValueError("logical non-power-of-two alloc requires the NVIDIA backend")
+            if storage != tle.smem:
+                raise ValueError("logical non-power-of-two alloc is supported only in NVIDIA SMEM")
             if alias is not None:
                 raise ValueError("logical non-power-of-two alloc cannot alias another allocation")
         if logical_candidate:
@@ -1269,14 +1278,18 @@ def copy(
             barrier_slot = _tma_completion_barrier_slot(barrier, _semantic)
             expect_bytes = barrier_slot.expect_bytes
 
-        # Only logical descriptors need the extra copy-shape contract.
-        # Ordinary TMA copies keep using the existing builder overload.
+        logical_desc = isinstance(desc, tle._logical_tensor_descriptor)
         copy_shape_args = ()
-        if isinstance(desc, tle._logical_tensor_descriptor):
+        if logical_desc and (
+                not isinstance(src, tle._logical_tensor_descriptor)
+                or not isinstance(dst, tle.buffered_tensor)):
+            raise ValueError("logical TMA descriptors are only supported as global-memory sources")
+        if logical_desc:
             shape = [int(tl._unwrap_if_constexpr(dim)) for dim in shape]
             if shape != list(desc.block_shape):
                 raise ValueError("TMA copy shape must match descriptor.block_shape; "
                                  "declare the full logical block in the descriptor")
+            _semantic.builder.mark_logical_tensor_descriptor(desc.handle, shape)
             copy_shape_args = (shape, )
         assert len(offsets) == len(desc.shape), "Offsets and shape must have the same length"
         offsets = _semantic._convert_to_ir_values(offsets, require_i64=False)

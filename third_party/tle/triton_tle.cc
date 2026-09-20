@@ -28,6 +28,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
@@ -83,6 +84,28 @@ extern tle::DSLRegionOp createTLERawRegionDeferred(
     const std::vector<Value> &args,
     const std::vector<int64_t> &aliasOperandIndices, std::string_view hint,
     std::string_view dsl_file_name, std::string_view extern_func_name);
+
+static Value resolveWarpSpecializeCapture(Value value) {
+  while (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    auto partitions = dyn_cast<ttg::WarpSpecializePartitionsOp>(
+        blockArg.getOwner()->getParentOp());
+    if (!partitions)
+      break;
+    auto warpSpecialize =
+        dyn_cast<ttg::WarpSpecializeOp>(partitions->getParentOp());
+    if (!warpSpecialize)
+      break;
+    auto captures = warpSpecialize.getExplicitCaptures();
+    unsigned index = blockArg.getArgNumber();
+    if (index >= captures.size())
+      break;
+    Value capture = captures[index];
+    if (capture == value)
+      break;
+    value = capture;
+  }
+  return value;
+}
 
 void init_triton_tle_ir(py::module &&m) {
 
@@ -241,10 +264,47 @@ void init_triton_tle_ir(py::module &&m) {
       .def("mark_logical_tensor_descriptor",
            [](TritonOpBuilder &self, Value value,
               std::vector<int64_t> logicalShape) {
+             Value descriptorValue = resolveWarpSpecializeCapture(value);
+             auto op = dyn_cast_or_null<triton::MakeTensorDescOp>(
+                 descriptorValue.getDefiningOp());
+             if (!op)
+               throw py::value_error(
+                   "logical tensor descriptor must be defined by make_tensor_descriptor");
+             ArrayRef<int64_t> requested(logicalShape);
+             auto pending = op->getAttrOfType<DenseI64ArrayAttr>(
+                 "tle.logical_descriptor_pending");
+             auto candidate = op->getAttrOfType<DenseI64ArrayAttr>(
+                 "tle.logical_descriptor_candidate");
+             auto active = op->getAttrOfType<DenseI64ArrayAttr>(
+                 "tle.logical_descriptor_shape");
+             if ((!pending && !candidate && !active) ||
+                 (pending && pending.asArrayRef() != requested) ||
+                 (candidate && candidate.asArrayRef() != requested) ||
+                 (active && active.asArrayRef() != requested))
+               throw py::value_error(
+                   "logical tensor descriptor shape does not match its frontend metadata");
+             op->removeAttr("tle.logical_descriptor_candidate");
+             op->removeAttr("tle.logical_descriptor_pending");
+             op->setAttr("tle.logical_descriptor_shape",
+                         self.getBuilder().getDenseI64ArrayAttr(logicalShape));
+           })
+      .def("mark_logical_tensor_descriptor_pending",
+           [](TritonOpBuilder &self, Value value,
+              std::vector<int64_t> logicalShape) {
              cast<triton::MakeTensorDescOp>(value.getDefiningOp())
-                 ->setAttr(
-                     "tle.logical_descriptor_shape",
-                     self.getBuilder().getDenseI64ArrayAttr(logicalShape));
+                 ->setAttr("tle.logical_descriptor_pending",
+                           self.getBuilder().getDenseI64ArrayAttr(logicalShape));
+           })
+      .def("validate_logical_tensor_descriptors",
+           [](TritonOpBuilder &, mlir::ModuleOp &module) {
+             bool hasPendingDescriptor = false;
+             module.walk([&](Operation *op) {
+               hasPendingDescriptor |=
+                   op->hasAttr("tle.logical_descriptor_pending");
+             });
+             if (hasPendingDescriptor)
+               throw py::value_error(
+                   "non-power-of-two tensor descriptors require tle.gpu.copy");
            })
       .def("mark_logical_alloc_candidate",
            [](TritonOpBuilder &self, Value value,

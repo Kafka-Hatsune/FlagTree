@@ -39,6 +39,13 @@ from math import prod
 class TLEFrontendSemantic(TritonSemantic):
     """Triton frontend with logical descriptor carriers for TLE lowering."""
 
+    @staticmethod
+    def _reject_logical_descriptor_use(desc):
+        """Reject only logical descriptors; ordinary descriptors keep Triton semantics."""
+        if not isinstance(desc, tle._logical_tensor_descriptor):
+            return
+        raise ValueError("logical TLE tensor descriptors must be used with tle.gpu.copy")
+
     def make_tensor_descriptor(self, base, shape, strides, block_shape, padding_option="zero"):
         block_shape = tl.core._unwrap_shape(block_shape)
         logical_shape = None
@@ -53,9 +60,52 @@ class TLEFrontendSemantic(TritonSemantic):
             block_shape = [1 << (dim - 1).bit_length() for dim in block_shape]
         desc = super().make_tensor_descriptor(base, shape, strides, block_shape, padding_option)
         if logical_shape is not None:
-            self.builder.mark_logical_tensor_descriptor(desc.handle, logical_shape)
+            # Keep the carrier descriptor ordinary until a TLE TMA copy
+            # consumes it.  This prevents unused descriptors from entering
+            # logical-domain planning.
+            self.builder.mark_logical_tensor_descriptor_pending(desc.handle, logical_shape)
             desc = tle._logical_tensor_descriptor(desc, logical_shape)
         return desc
+
+    def descriptor_load(self, desc, offsets, cache_modifier, eviction_policy):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_load(desc, offsets, cache_modifier, eviction_policy)
+
+    def descriptor_store(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_store(desc, value, offsets)
+
+    def descriptor_atomic_add(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_add(desc, value, offsets)
+
+    def descriptor_atomic_min(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_min(desc, value, offsets)
+
+    def descriptor_atomic_max(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_max(desc, value, offsets)
+
+    def descriptor_atomic_and(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_and(desc, value, offsets)
+
+    def descriptor_atomic_or(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_or(desc, value, offsets)
+
+    def descriptor_atomic_xor(self, desc, value, offsets):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_atomic_xor(desc, value, offsets)
+
+    def descriptor_gather(self, desc, x_offsets, y_offset, cache_modifier, eviction_policy):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_gather(desc, x_offsets, y_offset, cache_modifier, eviction_policy)
+
+    def descriptor_scatter(self, desc, value, x_offsets, y_offset):
+        self._reject_logical_descriptor_use(desc)
+        return super().descriptor_scatter(desc, value, x_offsets, y_offset)
 
 
 class TLESemanticError(Exception):

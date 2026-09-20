@@ -1481,10 +1481,10 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       // A barrier may cover multiple logical copies, but every complete
       // logical copy contributes exactly this many bytes.
       if (expectBytes.getInt() % logicalBytes != 0)
-        return emitError(copy, index)
-               << "expect_bytes must be a multiple of the logical TMA byte "
-                  "count ("
-               << logicalBytes << ")";
+        return emitError(copy, index,
+                         "expect_bytes must be a multiple of the logical TMA "
+                         "byte count (" +
+                             Twine(logicalBytes) + ")");
     }
 #endif
     if (phase == LogicalDomainPhase::Plan) {
