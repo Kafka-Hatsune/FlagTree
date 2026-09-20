@@ -334,11 +334,12 @@ convertLogicalDot(const LLVMTypeConverter *typeConverter,
     return op->emitOpError(
         "tle.wgmma_active_n and tle.wgmma_active_k cannot be combined");
   if (activeNAttr) {
-    assert(activeNAttr.getInt() > 0 && activeNAttr.getInt() % 8 == 0 &&
-           activeNAttr.getInt() <= physicalN &&
-           "active_n verifier must restrict codegen to a positive multiple "
-           "of 8 within one physical N carrier");
-    N = activeNAttr.getInt();
+    int64_t activeN = activeNAttr.getInt();
+    if (activeN <= 0 || activeN % 8 != 0 || activeN > physicalN)
+      return op->emitOpError(
+          "tle.wgmma_active_n must select a positive multiple of 8 within "
+          "one physical N carrier");
+    N = activeN;
   }
   unsigned wgmmaAccSize = 2 * (N / 4);
   bool zeroAcc = isZeroConst(c);
@@ -389,6 +390,10 @@ convertLogicalDot(const LLVMTypeConverter *typeConverter,
     if (failed(plan))
       return failure();
     tiledPlan = *plan;
+    if (activeNAttr && numRepN != 1)
+      return op->emitOpError(
+          "tiled WGMMA active_n requires a single N tile in the selected "
+          "accumulator layout");
     if (activeKAttr && activeKAttr.getInt() != tiledPlan->logicalK())
       return op->emitOpError(
           "tle.wgmma_active_k must equal the tiled SMEM logical K extent");
