@@ -1471,6 +1471,22 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       return emitError(copy, index,
                        "logical TMA source and destination element types "
                        "must match");
+#ifndef __HCU__
+    if (copy.getBarrier()) {
+      auto expectBytes = copy.getExpectBytesAttr();
+      int64_t elementBytes =
+          blockType.getElementType().getIntOrFloatBitWidth() / 8;
+      int64_t logicalBytes = state->logicalShape[0] *
+                             state->logicalShape[1] * elementBytes;
+      // A barrier may cover multiple logical copies, but every complete
+      // logical copy contributes exactly this many bytes.
+      if (expectBytes.getInt() % logicalBytes != 0)
+        return emitError(copy, index)
+               << "expect_bytes must be a multiple of the logical TMA byte "
+                  "count ("
+               << logicalBytes << ")";
+    }
+#endif
     if (phase == LogicalDomainPhase::Plan) {
       auto *root = findRootAction(plan, state->provenance.primaryRoot());
       if (!root)
