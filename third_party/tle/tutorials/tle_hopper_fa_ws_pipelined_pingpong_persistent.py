@@ -14,6 +14,7 @@ import argparse
 import csv
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Iterable, Optional
 
 import torch
@@ -22,6 +23,33 @@ import triton.language as tl
 import triton.experimental.tle.language as tle
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
+
+# ptxas 12.8.93 can sink an invariant descriptor into a zero-trip KV loop.
+# The unguarded consumer loops below are only supported with the first
+# toolchain validated for this tutorial on H20/H800.
+_MIN_PTXAS_VERSION = (13, 1)
+
+
+@lru_cache(maxsize=None)
+def _require_supported_ptxas(arch: int) -> None:
+    try:
+        # get_ptxas() uses Triton's configured, cached NvidiaTool. Its parsed
+        # release version is the same tool selection used by lowering.
+        from triton.backends.nvidia.compiler import get_ptxas
+        tool = get_ptxas(arch)
+        version = tuple(int(part) for part in tool.version.split("."))
+    except (ImportError, RuntimeError, AttributeError, ValueError) as exc:
+        raise RuntimeError(
+            "Unable to query the ptxas selected by Triton for the Hopper FA tutorial"
+        ) from exc
+
+    if version < _MIN_PTXAS_VERSION:
+        required = ".".join(map(str, _MIN_PTXAS_VERSION))
+        found = ".".join(map(str, version))
+        raise RuntimeError(
+            f"The unguarded Hopper FA tutorial requires ptxas >= {required}; "
+            f"Triton selected {found} at {tool.path}. Upgrade CUDA/ptxas before running it."
+        )
 
 
 def alloc_fn(size: int, align: int, stream: Optional[int]):
@@ -176,7 +204,6 @@ def _attn_fwd_tle_ws_barrier_consumer(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     EVEN_N: tl.constexpr,
-    HAS_KV_LOOP: tl.constexpr,
     NUM_BUFFERS_Q: tl.constexpr,
     NUM_BUFFERS_KV: tl.constexpr,
     BM_SPLIT: tl.constexpr,
@@ -244,55 +271,51 @@ def _attn_fwd_tle_ws_barrier_consumer(
         m_i = m_ij
         accum_cnt_kv += 1
 
-        # Omit the consumer loop for a single KV block. This also avoids
-        # ptxas sinking a shared descriptor into a zero-trip loop and
-        # then reusing that uninitialized descriptor in the final PV.
-        if HAS_KV_LOOP:
-            for kv_idx in range(BLOCK_N, N_CTX, BLOCK_N):
-                kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
-                tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
+        for kv_idx in range(BLOCK_N, N_CTX, BLOCK_N):
+            kv_buf, kv_phase_idx = _buf_phase(accum_cnt_kv, NUM_BUFFERS_KV)
+            tle.gpu.barrier_wait(k_fulls[kv_buf], phaseIdx=kv_phase_idx)
 
-                if consumer_idx == 0:
-                    tle.gpu.barrier_wait(ping_to_c0)
-                else:
-                    tle.gpu.barrier_wait(ping_to_c1)
-                qk = tle.gpu.wgmma(
-                    q_smem.slot(q_idx),
-                    k_smem.slot(kv_buf),
-                    out_dtype=tl.float32,
-                    trans_b=True,
-                )
-                if consumer_idx == 0:
-                    tle.gpu.barrier_arrive(ping_to_c1)
-                else:
-                    tle.gpu.barrier_arrive(ping_to_c0)
+            if consumer_idx == 0:
+                tle.gpu.barrier_wait(ping_to_c0)
+            else:
+                tle.gpu.barrier_wait(ping_to_c1)
+            qk = tle.gpu.wgmma(
+                q_smem.slot(q_idx),
+                k_smem.slot(kv_buf),
+                out_dtype=tl.float32,
+                trans_b=True,
+            )
+            if consumer_idx == 0:
+                tle.gpu.barrier_arrive(ping_to_c1)
+            else:
+                tle.gpu.barrier_arrive(ping_to_c0)
 
-                v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
-                tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
-                acc = tle.gpu.wgmma(p, v_smem.slot(v_buf), acc)
+            v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
+            tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
+            acc = tle.gpu.wgmma(p, v_smem.slot(v_buf), acc)
 
-                qk = tle.gpu.wgmma_wait(1, qk)
-                tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
+            qk = tle.gpu.wgmma_wait(1, qk)
+            tle.gpu.barrier_arrive(k_empties[kv_buf], phaseIdx=kv_phase_idx)
 
-                # Mask before softmax: the flattened descriptor can read the next head.
-                if not EVEN_N:
-                    if kv_idx + BLOCK_N > N_CTX:
-                        cols = kv_idx + tl.arange(0, triton.next_power_of_2(BLOCK_N))
-                        qk = tl.where(cols[None, :] < N_CTX, qk, float("-inf"))
+            # Mask before softmax: the flattened descriptor can read the next head.
+            if not EVEN_N:
+                if kv_idx + BLOCK_N > N_CTX:
+                    cols = kv_idx + tl.arange(0, triton.next_power_of_2(BLOCK_N))
+                    qk = tl.where(cols[None, :] < N_CTX, qk, float("-inf"))
 
-                m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-                qk = qk * qk_scale - m_ij[:, None]
-                p = tl.math.exp2(qk)
-                alpha = tl.math.exp2(m_i - m_ij)
-                l_ij = tl.sum(p, 1)
-                l_i = l_i * alpha + l_ij
-                p = p.to(tl.float16)
-                m_i = m_ij
+            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
+            p = tl.math.exp2(qk)
+            alpha = tl.math.exp2(m_i - m_ij)
+            l_ij = tl.sum(p, 1)
+            l_i = l_i * alpha + l_ij
+            p = p.to(tl.float16)
+            m_i = m_ij
 
-                acc = tle.gpu.wgmma_wait(0, acc)
-                tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
-                acc = acc * alpha[:, None]
-                accum_cnt_kv += 1
+            acc = tle.gpu.wgmma_wait(0, acc)
+            tle.gpu.barrier_arrive(v_empties[v_buf], phaseIdx=v_phase_idx)
+            acc = acc * alpha[:, None]
+            accum_cnt_kv += 1
 
         v_buf, v_phase_idx = _buf_phase(accum_cnt_kv - 1, NUM_BUFFERS_KV)
         tle.gpu.barrier_wait(v_fulls[v_buf], phaseIdx=v_phase_idx)
@@ -332,7 +355,6 @@ def _attn_fwd_tle_ws_persistent_barrier(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     EVEN_N: tl.constexpr,
-    HAS_KV_LOOP: tl.constexpr,
     NUM_BUFFERS_Q: tl.constexpr,
     NUM_BUFFERS_KV: tl.constexpr,
     NUM_MMA_WARPS: tl.constexpr,
@@ -458,7 +480,6 @@ def _attn_fwd_tle_ws_persistent_barrier(
                     BLOCK_M,
                     BLOCK_N,
                     EVEN_N,
-                    HAS_KV_LOOP,
                     NUM_BUFFERS_Q,
                     NUM_BUFFERS_KV,
                     BM_SPLIT,
@@ -489,7 +510,6 @@ def _attn_fwd_tle_ws_persistent_barrier(
                     BLOCK_M,
                     BLOCK_N,
                     EVEN_N,
-                    HAS_KV_LOOP,
                     NUM_BUFFERS_Q,
                     NUM_BUFFERS_KV,
                     BM_SPLIT,
@@ -619,7 +639,6 @@ def _attn_fwd_tle_ws_pipe_consumer(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     EVEN_N: tl.constexpr,
-    HAS_KV_LOOP: tl.constexpr,
     HAS_FULL_KV_LOOP: tl.constexpr,
     NUM_BUFFERS_Q: tl.constexpr,
     BM_SPLIT: tl.constexpr,
@@ -690,60 +709,56 @@ def _attn_fwd_tle_ws_pipe_consumer(
 
         # Specialize full tiles and the final partial tile separately so
         # the hot loop contains no tail test or softmax mask.
-        # Omit the consumer loop for a single KV block. This also avoids
-        # ptxas sinking a shared descriptor into a zero-trip loop and
-        # then reusing that uninitialized descriptor in the final PV.
-        if HAS_KV_LOOP:
-            for phase in tl.static_range(0 if HAS_FULL_KV_LOOP else 1, 1 if EVEN_N else 2):
-                if phase == 0:
-                    lo = BLOCK_N
-                    hi = N_CTX if EVEN_N else N_CTX // BLOCK_N * BLOCK_N
+        for phase in tl.static_range(0 if HAS_FULL_KV_LOOP else 1, 1 if EVEN_N else 2):
+            if phase == 0:
+                lo = BLOCK_N
+                hi = N_CTX if EVEN_N else N_CTX // BLOCK_N * BLOCK_N
+            else:
+                lo = tl.maximum(BLOCK_N, N_CTX // BLOCK_N * BLOCK_N)
+                hi = N_CTX
+            for kv_idx in range(lo, hi, BLOCK_N):
+                k_wait = k_reader.wait(accum_cnt_kv)
+
+                if consumer_idx == 0:
+                    tle.gpu.barrier_wait(ping_to_c0)
                 else:
-                    lo = tl.maximum(BLOCK_N, N_CTX // BLOCK_N * BLOCK_N)
-                    hi = N_CTX
-                for kv_idx in range(lo, hi, BLOCK_N):
-                    k_wait = k_reader.wait(accum_cnt_kv)
+                    tle.gpu.barrier_wait(ping_to_c1)
+                qk = tle.gpu.wgmma(
+                    q_smem.slot(q_idx),
+                    k_wait.slot.k,
+                    out_dtype=tl.float32,
+                    trans_b=True,
+                )
+                if consumer_idx == 0:
+                    tle.gpu.barrier_arrive(ping_to_c1)
+                else:
+                    tle.gpu.barrier_arrive(ping_to_c0)
 
-                    if consumer_idx == 0:
-                        tle.gpu.barrier_wait(ping_to_c0)
-                    else:
-                        tle.gpu.barrier_wait(ping_to_c1)
-                    qk = tle.gpu.wgmma(
-                        q_smem.slot(q_idx),
-                        k_wait.slot.k,
-                        out_dtype=tl.float32,
-                        trans_b=True,
-                    )
-                    if consumer_idx == 0:
-                        tle.gpu.barrier_arrive(ping_to_c1)
-                    else:
-                        tle.gpu.barrier_arrive(ping_to_c0)
+                v_iter = accum_cnt_kv - 1
+                v_wait = v_reader.wait(v_iter)
+                acc = tle.gpu.wgmma(p.to(tl.float16), v_wait.slot.v, acc)
 
-                    v_iter = accum_cnt_kv - 1
-                    v_wait = v_reader.wait(v_iter)
-                    acc = tle.gpu.wgmma(p.to(tl.float16), v_wait.slot.v, acc)
+                qk = tle.gpu.wgmma_wait(1, qk)
+                k_reader.release(accum_cnt_kv)
 
-                    qk = tle.gpu.wgmma_wait(1, qk)
-                    k_reader.release(accum_cnt_kv)
+                if phase == 1:
+                    cols = kv_idx + tl.arange(0, triton.next_power_of_2(BLOCK_N))
+                    qk = tl.where(cols[None, :] < N_CTX, qk, float("-inf"))
 
-                    if phase == 1:
-                        cols = kv_idx + tl.arange(0, triton.next_power_of_2(BLOCK_N))
-                        qk = tl.where(cols[None, :] < N_CTX, qk, float("-inf"))
+                m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+                qk = qk * qk_scale - m_ij[:, None]
+                p = tl.math.exp2(qk)
+                alpha = tl.math.exp2(m_i - m_ij)
+                l_ij = tl.sum(p, 1)
+                l_i = l_i * alpha + l_ij
+                if EARLY_CAST_P:
+                    p = p.to(tl.float16)
+                m_i = m_ij
 
-                    m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-                    qk = qk * qk_scale - m_ij[:, None]
-                    p = tl.math.exp2(qk)
-                    alpha = tl.math.exp2(m_i - m_ij)
-                    l_ij = tl.sum(p, 1)
-                    l_i = l_i * alpha + l_ij
-                    if EARLY_CAST_P:
-                        p = p.to(tl.float16)
-                    m_i = m_ij
-
-                    acc = tle.gpu.wgmma_wait(0, acc)
-                    v_reader.release(v_iter)
-                    acc = acc * alpha[:, None]
-                    accum_cnt_kv += 1
+                acc = tle.gpu.wgmma_wait(0, acc)
+                v_reader.release(v_iter)
+                acc = acc * alpha[:, None]
+                accum_cnt_kv += 1
 
         v_iter = accum_cnt_kv - 1
         v_wait = v_reader.wait(v_iter)
@@ -787,7 +802,6 @@ def _attn_fwd_tle_ws_persistent_pipe(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     EVEN_N: tl.constexpr,
-    HAS_KV_LOOP: tl.constexpr,
     HAS_FULL_KV_LOOP: tl.constexpr,
     NUM_BUFFERS_Q: tl.constexpr,
     NUM_BUFFERS_KV: tl.constexpr,
@@ -900,7 +914,6 @@ def _attn_fwd_tle_ws_persistent_pipe(
                     BLOCK_M,
                     BLOCK_N,
                     EVEN_N,
-                    HAS_KV_LOOP,
                     HAS_FULL_KV_LOOP,
                     NUM_BUFFERS_Q,
                     BM_SPLIT,
@@ -928,7 +941,6 @@ def _attn_fwd_tle_ws_persistent_pipe(
                     BLOCK_M,
                     BLOCK_N,
                     EVEN_N,
-                    HAS_KV_LOOP,
                     HAS_FULL_KV_LOOP,
                     NUM_BUFFERS_Q,
                     BM_SPLIT,
@@ -982,6 +994,8 @@ def tle_attention(
     if consumer_max_nreg < 24 or consumer_max_nreg > 256 or consumer_max_nreg % 8:
         raise ValueError("consumer_max_nreg must be a multiple of 8 in [24, 256]")
     assert q.is_cuda and k.is_cuda and v.is_cuda
+    major, minor = torch.cuda.get_device_capability(q.device)
+    _require_supported_ptxas(major * 10 + minor)
     assert q.device == k.device == v.device
     assert q.dtype == k.dtype == v.dtype == torch.float16
     assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous()
@@ -1021,7 +1035,6 @@ def tle_attention(
         num_warps=producer_num_warps,
     )
     options["EVEN_N"] = n_ctx % block_n == 0
-    options["HAS_KV_LOOP"] = n_ctx > block_n
     if implementation == "barrier":
         kernel = _attn_fwd_tle_ws_persistent_barrier[grid](sm_scale, m, z, h, q, k, v, o, n_ctx, **options)
     else:
