@@ -60,6 +60,9 @@ std::optional<int64_t> getStaticExtractTileIndex(ExtractTileOp op);
 /// permutation and does not require shared-memory scratch space.
 bool isExtractTileCTAAligned(ExtractTileOp op, int64_t linearIndex);
 
+// Helper function that accepts both "acq_rel" and the legacy "acqrel"
+// spelling.
+std::optional<MemoryOrder> parseMemoryOrder(::llvm::StringRef str);
 } // namespace mlir::triton::tle
 
 #endif

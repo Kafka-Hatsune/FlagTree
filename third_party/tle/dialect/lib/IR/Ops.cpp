@@ -1117,7 +1117,7 @@ LogicalResult DistributedBarrierOp::verify() {
       return emitOpError()
              << "FlagCX space must be 'device', 'inter', or 'world', got '"
              << space << "'";
-    return DistributedBarrier::verifyFlagCxSpace(op, getSrc());
+    return DistributedBarrier::verifyFlagCxSpace(*this, getSrc());
   }
 
   auto kindAttr = op->getAttrOfType<StringAttr>("group_kind");
@@ -1202,14 +1202,14 @@ LogicalResult DistributedBarrierOp::verify() {
 LogicalResult NodePutOp::verify() {
   return verifyNodeTransfer(getOperation(), getSrc(), getDstMem(), getComm(),
                             getPeer(), getSrcOffset(), getDstOffset(),
-                            getNelems(), getNetIdx(), getElemBytesAttr(),
+                            getNelems(), getContextIdAttr(), getElemBytesAttr(),
                             getCoopKind());
 }
 
 LogicalResult NodeGetOp::verify() {
   return verifyNodeTransfer(getOperation(), getSrc(), getDstMem(), getComm(),
                             getPeer(), getSrcOffset(), getDstOffset(),
-                            getNelems(), getNetIdx(), getElemBytesAttr(),
+                            getNelems(), getContextIdAttr(), getElemBytesAttr(),
                             getCoopKind());
 }
 
@@ -1226,7 +1226,7 @@ LogicalResult RemotePointersOp::verify() {
     return RemotePointers::verifyNodeSpace(*this);
 
   auto coopKindAttr = getCoopKindAttr();
-  if (getComm() || getNetIdx() || coopKindAttr)
+  if (getComm() || getContextIdAttr() || coopKindAttr)
     return emitOpError()
            << "cluster/device space does not accept node-only operands or "
               "attributes";
@@ -1333,13 +1333,14 @@ LogicalResult RemotePointersOp::verify() {
 }
 
 LogicalResult SignalOp::verify() {
-  if (auto err = Signal::verifySignalOp(getSignalOp(), getValue()))
+  if (auto err = Signal::verifySignalOp(getSignalOp(), getValue(), getScope()))
     return emitOpError() << *err;
   return success();
 }
 
 LogicalResult SignalWaitOp::verify() {
-  if (auto err = Signal::verifySignalWaitOp(getWaitKind(), getTarget()))
+  if (auto err =
+          Signal::verifySignalWaitOp(getWaitKind(), getTarget(), getOrder()))
     return emitOpError() << *err;
   return success();
 }
