@@ -355,6 +355,29 @@ LogicalResult WGMMAOp::verify() {
   if (cShape[0] != aShape[0] || cShape[1] != bShape[1])
     return emitOpError("expects accumulator shape to be MxN from A and B");
 
+  IntegerAttr activeN = getActiveNAttr();
+  IntegerAttr activeK = getActiveKAttr();
+  ExactSMEMStage tiledBStage = getExactSMEMStage(getB());
+  ExactSMEMStage tiledAStage;
+  if (isa<triton::gpu::MemDescType>(getA().getType()))
+    tiledAStage = getExactSMEMStage(getA());
+
+  // Keep the original verifier contract for ordinary WGMMA.  The stricter
+  // type table and bounded-domain checks below are only for logical-domain
+  // lowering, which is identified by an active extent or a tiled SMEM stage.
+  if (!activeN && !activeK && !tiledBStage && !tiledAStage) {
+    auto dType = cast<RankedTensorType>(getD().getType());
+    if (dType.getShape() != cShape)
+      return emitOpError("expects result shape to match accumulator shape");
+    if (aShape[0] < 64 || aShape[0] % 64 != 0)
+      return emitOpError("expects M dimension to be divisible by 64");
+    if (bShape[1] < 8 || bShape[1] % 8 != 0)
+      return emitOpError("expects N dimension to be divisible by 8");
+    if (aShape[1] < 16)
+      return emitOpError("expects K dimension to be at least 16");
+    return success();
+  }
+
   Type aElemType = aType.getElementType();
   Type bElemType = bType.getElementType();
   std::optional<int64_t> instructionK = getWGMMAInstructionK(aElemType);
@@ -373,12 +396,6 @@ LogicalResult WGMMAOp::verify() {
     return emitOpError("expects K dimension to contain at least one WGMMA "
                        "instruction for its operand type");
 
-  IntegerAttr activeN = getActiveNAttr();
-  IntegerAttr activeK = getActiveKAttr();
-  ExactSMEMStage tiledBStage = getExactSMEMStage(getB());
-  ExactSMEMStage tiledAStage;
-  if (isa<triton::gpu::MemDescType>(getA().getType()))
-    tiledAStage = getExactSMEMStage(getA());
   if (tiledAStage)
     return emitOpError(
         "does not permit a tiled SMEM stage as the WGMMA A operand");
