@@ -632,7 +632,7 @@ class buffered_tensor(tl.base_value):
         # A slot is an ordinary carrier view. Logical extents are seeded on
         # local_alloc and propagated through memdesc_index in TTIR.
         slot_shape = list(self.shape[1:])
-        is_subview = self.type.alloc_shape != self.shape
+        is_subview = self.type.alloc_shape != list(self.shape)
         # A slot of a subview must retain the complete allocation shape.  The
         # extra leading dimension records the ring-buffer allocation while
         # the trailing dimensions provide the physical stride of one stage.
@@ -788,7 +788,7 @@ class buffered_tensor_type(tl.base_type):
         elt = self.scalar.mangle()
         shape = '_'.join(map(str, self.shape))
         alloc_suffix = ""
-        if self.alloc_shape != self.shape:
+        if self.alloc_shape != list(self.shape):
             alloc_shape = '_'.join(map(str, self.alloc_shape))
             alloc_suffix = f"A{alloc_shape}"
         remote_suffix = ""
