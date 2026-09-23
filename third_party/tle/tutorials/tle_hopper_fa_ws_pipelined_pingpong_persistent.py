@@ -25,8 +25,8 @@ import triton.experimental.tle.language as tle
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 # ptxas 12.8.93 can sink an invariant descriptor into a zero-trip KV loop.
-# The unguarded consumer loops below are only supported with the first
-# toolchain validated for this tutorial on H20/H800.
+# Only N_CTX <= BLOCK_N needs the newer toolchain; longer sequences execute
+# the KV loop and can use the ptxas bundled with Triton.
 _MIN_PTXAS_VERSION = (13, 1)
 
 
@@ -44,7 +44,7 @@ def _require_supported_ptxas(arch: int) -> None:
     if version < _MIN_PTXAS_VERSION:
         required = ".".join(map(str, _MIN_PTXAS_VERSION))
         found = ".".join(map(str, version))
-        raise RuntimeError(f"The unguarded Hopper FA tutorial requires ptxas >= {required}; "
+        raise RuntimeError(f"The Hopper FA tutorial requires ptxas >= {required} when N_CTX <= BLOCK_N; "
                            f"Triton selected {found} at {tool.path}. Upgrade CUDA/ptxas before running it.")
 
 
@@ -990,8 +990,6 @@ def tle_attention(
     if consumer_max_nreg < 24 or consumer_max_nreg > 256 or consumer_max_nreg % 8:
         raise ValueError("consumer_max_nreg must be a multiple of 8 in [24, 256]")
     assert q.is_cuda and k.is_cuda and v.is_cuda
-    major, minor = torch.cuda.get_device_capability(q.device)
-    _require_supported_ptxas(major * 10 + minor)
     assert q.device == k.device == v.device
     assert q.dtype == k.dtype == v.dtype == torch.float16
     assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous()
@@ -1007,6 +1005,9 @@ def tle_attention(
         raise ValueError("BLOCK_N must be a positive multiple of 16 no greater than 256")
     if n_ctx % block_m:
         raise ValueError("N_CTX must be a multiple of BLOCK_M")
+    if n_ctx <= block_n:
+        major, minor = torch.cuda.get_device_capability(q.device)
+        _require_supported_ptxas(major * 10 + minor)
     triton.set_allocator(alloc_fn)
     o = torch.empty_like(q) if out is None else out
     m = torch.empty((z, h, n_ctx), device=q.device, dtype=torch.float32) if m_out is None else m_out
