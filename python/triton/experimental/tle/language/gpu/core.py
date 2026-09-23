@@ -429,8 +429,7 @@ def alloc(
     payload_shape_for_validation = [tl._unwrap_if_constexpr(dim) for dim in shape]
     capacity_for_validation = tl._unwrap_if_constexpr(capacity)
     if (capacity_for_validation is None and storage == tle.smem and not mthreads_common.enabled()
-            and any(isinstance(dim, int) and dim > 0 and dim & (dim - 1)
-                    for dim in payload_shape_for_validation)):
+            and any(isinstance(dim, int) and dim > 0 and dim & (dim - 1) for dim in payload_shape_for_validation)):
         raise ValueError("tle.gpu.alloc without capacity requires every SMEM shape dimension to be a power of 2")
     if tle_semantic.COMMON_IR_ENABLED:
         if storage is not tle.smem:
@@ -519,8 +518,7 @@ def alloc(
                         layout.numCTAOrder,
                     )
                 else:
-                    layout = tle.nv_mma_shared_layout.make_default(
-                        shape if capacity is None else storage_shape, dtype)
+                    layout = tle.nv_mma_shared_layout.make_default(shape if capacity is None else storage_shape, dtype)
                     layout_handle = _semantic.builder.make_nv_mma_shared_encoding_attr(
                         [int(x) for x in layout.shape],
                         layout.order,
@@ -1310,9 +1308,8 @@ def copy(
 
         logical_desc = isinstance(desc, tle._logical_tensor_descriptor)
         copy_shape_args = ()
-        if logical_desc and (
-                not isinstance(src, tle._logical_tensor_descriptor)
-                or not isinstance(dst, tle.buffered_tensor)):
+        if logical_desc and (not isinstance(src, tle._logical_tensor_descriptor)
+                             or not isinstance(dst, tle.buffered_tensor)):
             raise ValueError("logical TMA descriptors are only supported as global-memory sources")
         if logical_desc:
             shape = [int(tl._unwrap_if_constexpr(dim)) for dim in shape]

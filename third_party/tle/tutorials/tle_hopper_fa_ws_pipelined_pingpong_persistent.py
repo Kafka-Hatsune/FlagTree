@@ -39,17 +39,13 @@ def _require_supported_ptxas(arch: int) -> None:
         tool = get_ptxas(arch)
         version = tuple(int(part) for part in tool.version.split("."))
     except (ImportError, RuntimeError, AttributeError, ValueError) as exc:
-        raise RuntimeError(
-            "Unable to query the ptxas selected by Triton for the Hopper FA tutorial"
-        ) from exc
+        raise RuntimeError("Unable to query the ptxas selected by Triton for the Hopper FA tutorial") from exc
 
     if version < _MIN_PTXAS_VERSION:
         required = ".".join(map(str, _MIN_PTXAS_VERSION))
         found = ".".join(map(str, version))
-        raise RuntimeError(
-            f"The unguarded Hopper FA tutorial requires ptxas >= {required}; "
-            f"Triton selected {found} at {tool.path}. Upgrade CUDA/ptxas before running it."
-        )
+        raise RuntimeError(f"The unguarded Hopper FA tutorial requires ptxas >= {required}; "
+                           f"Triton selected {found} at {tool.path}. Upgrade CUDA/ptxas before running it.")
 
 
 def alloc_fn(size: int, align: int, stream: Optional[int]):

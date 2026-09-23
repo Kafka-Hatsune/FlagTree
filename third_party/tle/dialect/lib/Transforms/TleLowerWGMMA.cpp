@@ -115,10 +115,9 @@ static RankedTensorType getMMAType(WGMMAOp op) {
       mmaVersionToInstrShape(3, retShapePerCTA, aElemType, numWarps);
   if (auto activeN = op.getActiveNAttr();
       activeN && activeN.getInt() > instrShape[1]) {
-    op.emitOpError()
-        << "active_n=" << activeN.getInt()
-        << " exceeds the selected WGMMA instruction N=" << instrShape[1]
-        << " for ttg.num-warps=" << numWarps;
+    op.emitOpError() << "active_n=" << activeN.getInt()
+                     << " exceeds the selected WGMMA instruction N="
+                     << instrShape[1] << " for ttg.num-warps=" << numWarps;
     return {};
   }
   SmallVector<unsigned, 2> warpsPerCTA = {numWarps, 1};

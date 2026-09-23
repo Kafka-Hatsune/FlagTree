@@ -59,13 +59,11 @@ class TLEFrontendSemantic(TritonSemantic):
             except RuntimeError as exc:
                 raise ValueError(
                     "TLE logical descriptors with non-power-of-two block shapes require the NVIDIA backend; "
-                    "the active backend could not be determined"
-                ) from exc
+                    "the active backend could not be determined") from exc
             if backend != "nvidia":
                 raise ValueError(
                     "TLE logical descriptors with non-power-of-two block shapes require the NVIDIA backend; "
-                    f"got backend {backend!r}"
-                )
+                    f"got backend {backend!r}")
             payload = block_shape[-2:]
             if (len(block_shape) < 2 or any(dim != 1 for dim in block_shape[:-2])
                     or sum(bool(dim & (dim - 1)) for dim in payload) != 1

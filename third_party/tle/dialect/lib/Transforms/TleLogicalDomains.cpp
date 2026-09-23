@@ -1476,8 +1476,8 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
       auto expectBytes = copy.getExpectBytesAttr();
       int64_t elementBytes =
           blockType.getElementType().getIntOrFloatBitWidth() / 8;
-      int64_t logicalBytes = state->logicalShape[0] *
-                             state->logicalShape[1] * elementBytes;
+      int64_t logicalBytes =
+          state->logicalShape[0] * state->logicalShape[1] * elementBytes;
       // A barrier may cover multiple logical copies, but every complete
       // logical copy contributes exactly this many bytes.
       if (expectBytes.getInt() % logicalBytes != 0)
