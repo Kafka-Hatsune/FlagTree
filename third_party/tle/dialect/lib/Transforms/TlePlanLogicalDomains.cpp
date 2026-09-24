@@ -204,7 +204,7 @@ static void applyLogicalInitializer(LogicalRootRewriteAction &action,
   OpBuilder builder(action.alloc);
   Location loc = action.alloc.getLoc();
   auto type = cast<RankedTensorType>(action.initializer.getType());
-  ArrayRef<int64_t> payloadShape = type.getShape().drop_front();
+  ArrayRef<int64_t> payloadShape = type.getShape().take_back(2);
   auto payloadType = RankedTensorType::get(payloadShape, type.getElementType());
   SmallVector<int64_t, 3> sourceStageShape{1, payloadShape[0], payloadShape[1]};
   Value initializer = action.initializer;
@@ -215,7 +215,9 @@ static void applyLogicalInitializer(LogicalRootRewriteAction &action,
       initializer = broadcast.getSrc();
   }
   Value broadcastPayload;
-  if (cast<RankedTensorType>(initializer.getType()).getShape()[0] == 1)
+  if (type.getRank() == 2)
+    broadcastPayload = initializer;
+  else if (cast<RankedTensorType>(initializer.getType()).getShape()[0] == 1)
     broadcastPayload = triton::ReshapeOp::create(builder, loc, payloadType,
                                                  initializer, false);
   const auto &tile = action.storageTileShape;
@@ -298,8 +300,8 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
   SmallVector<int64_t> exactShape{capacity * tilesPerStage, storageTileRows,
                                   storageTileCols};
   SmallVector<int64_t> storageTileShape{storageTileRows, storageTileCols};
-  assert(!action.stages.empty() &&
-         "validated root must have at least one stage view");
+  assert((oldType.getRank() == 2 || !action.stages.empty()) &&
+         "validated stage array must have at least one stage view");
   auto storageTileEncoding = action.storageEncoding;
   assert(storageTileEncoding && "shared encoding must be planned");
 
@@ -343,6 +345,20 @@ static void applyRootRewrite(LogicalRootRewriteAction &action) {
            "forwarded exact-SMEM use must have rewritten storage type");
     if (memdescUse.markTiledPipeField)
       addTiledPipeField(use->getOwner(), fieldIndex, builder);
+  }
+
+  if (oldType.getRank() == 2) {
+    auto storageTileType = ttg::MemDescType::get(
+        storageTileShape, oldType.getElementType(), storageTileEncoding,
+        oldType.getMemorySpace(), oldType.getMutableMemory(), storageTileShape);
+    Value zero =
+        arith::ConstantIntOp::create(builder, oldAlloc.getLoc(), 0, 32);
+    Value storageTile = ttg::MemDescIndexOp::create(
+        builder, oldAlloc.getLoc(), storageTileType, exactAlloc, zero);
+    auto carrier = ttg::MemDescReinterpretOp::create(builder, oldAlloc.getLoc(),
+                                                     oldType, storageTile);
+    carrier->setAttr(kExactSMEMStageAttr, builder.getUnitAttr());
+    oldAlloc.getResult().replaceAllUsesWith(carrier);
   }
 
   for (ttg::MemDescIndexOp stage : action.stages) {

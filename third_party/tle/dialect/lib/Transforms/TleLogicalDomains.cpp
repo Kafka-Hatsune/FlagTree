@@ -1297,25 +1297,27 @@ LogicalDomainContext::processCandidateAlloc(Operation *operation,
   auto type = alloc.getType();
   ArrayRef<int64_t> logical = logicalAttr.asArrayRef();
   int64_t fragmentAxis = axisAttr.getInt();
-  if (logical.size() != 3 || type.getRank() != 3 || fragmentAxis < 1 ||
-      fragmentAxis >= 3)
-    return alloc.emitOpError(
-        "logical candidate requires an explicit capacity and a rank-2 payload");
-  int64_t capacity = logical[0];
+  int64_t payloadOffset = logical.size() == 3 ? 1 : 0;
+  if ((logical.size() != 2 && logical.size() != 3) ||
+      type.getRank() != logical.size() || fragmentAxis < payloadOffset ||
+      fragmentAxis >= logical.size())
+    return alloc.emitOpError("logical candidate requires a rank-2 matrix with "
+                             "an optional leading stage dimension");
+  int64_t capacity = payloadOffset ? logical[0] : 1;
   if (capacity <= 0 || capacity > std::numeric_limits<int32_t>::max())
     return alloc.emitOpError(
         "logical capacity must fit a positive i32 stage index");
   if (llvm::isPowerOf2_64(logical[fragmentAxis]) ||
-      llvm::any_of(llvm::enumerate(logical.drop_front()),
+      llvm::any_of(llvm::enumerate(logical.drop_front(payloadOffset)),
                    [&](auto indexedExtent) {
-                     int64_t rootAxis = indexedExtent.index() + 1;
+                     int64_t rootAxis = indexedExtent.index() + payloadOffset;
                      return rootAxis != fragmentAxis &&
                             !llvm::isPowerOf2_64(indexedExtent.value());
                    }))
     return alloc.emitOpError(
         "logical candidate metadata must identify its only non-power-of-two "
         "payload axis");
-  if (llvm::any_of(logical.drop_front(),
+  if (llvm::any_of(logical.drop_front(payloadOffset),
                    [](int64_t extent) { return extent <= 0; }))
     return alloc.emitOpError("logical payload extents must be positive");
   if (logical[fragmentAxis] % 16 != 0)
@@ -1356,11 +1358,16 @@ LogicalDomainContext::processCandidateAlloc(Operation *operation,
     state.logicalShape.assign(logical.begin(), logical.end());
     state.axisMap = identityAxisMap(logical.size());
     state.provenance = {alloc, alloc};
+    state.isStage = !payloadOffset;
     mergeMemDesc(alloc.getResult(), state);
   } else if (!findRootAction(plan, alloc)) {
     LogicalRootRewriteAction action;
     action.alloc = alloc;
     action.logicalShape.assign(logical.begin(), logical.end());
+    // The storage plan counts matrices uniformly; this leading one exists
+    // only in the plan, never in the frontend allocation type.
+    if (!payloadOffset)
+      action.logicalShape.insert(action.logicalShape.begin(), 1);
     action.initializer = alloc.getSrc();
     plan.roots.push_back(std::move(action));
   }
@@ -1446,7 +1453,8 @@ LogicalDomainContext::processLogicalTMACopy(Operation *operation,
                        "logical TMA requires a rank-2 stage and tensor "
                        "descriptor source");
     if (!state->isStage || state->viewTransposed ||
-        !copy.getDst().getDefiningOp<ttg::MemDescIndexOp>())
+        !isa_and_nonnull<ttg::MemDescIndexOp, ttg::LocalAllocOp>(
+            copy.getDst().getDefiningOp()))
       return emitError(copy, index,
                        "logical TMA destination must be a direct stage view");
     RankedTensorType blockType = descType.getSignlessBlockType();
@@ -1511,8 +1519,10 @@ LogicalDomainContext::processLogicalPointerCopy(Operation *operation,
   auto srcType = dyn_cast<ttg::MemDescType>(pointers.getSrc().getType());
   auto ptrType = dyn_cast<RankedTensorType>(pointers.getResult().getType());
   if (!state->isStage || state->viewTransposed ||
-      !pointers.getSrc().getDefiningOp<ttg::MemDescIndexOp>() || !srcType ||
-      !ptrType || state->logicalShape.size() != 2 || srcType.getRank() != 2)
+      !isa_and_nonnull<ttg::MemDescIndexOp, ttg::LocalAllocOp>(
+          pointers.getSrc().getDefiningOp()) ||
+      !srcType || !ptrType || state->logicalShape.size() != 2 ||
+      srcType.getRank() != 2)
     return emitError(
         pointers, 0,
         "logical pointer copy requires a direct rank-2 stage destination");
@@ -1605,7 +1615,8 @@ LogicalDomainContext::processLocalStore(Operation *operation,
                                  "restricted logical tensor")
                : success();
   if (!state->isStage || state->viewTransposed ||
-      !store.getDst().getDefiningOp<ttg::MemDescIndexOp>() ||
+      !isa_and_nonnull<ttg::MemDescIndexOp, ttg::LocalAllocOp>(
+          store.getDst().getDefiningOp()) ||
       state->logicalShape.size() != 2)
     return emitError(store, 1,
                      "logical local store requires a direct rank-2 stage");
@@ -1775,12 +1786,14 @@ validatePlannedWGMMA(WGMMAOp dot, std::optional<int64_t> activeN,
     return dot.emitOpError("planned logical SMEM operand must have rank two");
 
   auto isDirectCandidateB = [&] {
-    return dot.getB().getDefiningOp<ttg::MemDescIndexOp>() != nullptr;
+    return isa_and_nonnull<ttg::MemDescIndexOp, ttg::LocalAllocOp>(
+        dot.getB().getDefiningOp());
   };
   auto isTransposedCandidateB = [&] {
     Operation *view = dot.getB().getDefiningOp();
     return view && isa<ttg::MemDescTransOp, MemDescWGMMAViewOp>(view) &&
-           view->getOperand(0).getDefiningOp<ttg::MemDescIndexOp>() != nullptr;
+           isa_and_nonnull<ttg::MemDescIndexOp, ttg::LocalAllocOp>(
+               view->getOperand(0).getDefiningOp());
   };
   auto hasCandidateBTopology = [&] {
     return candidateB && (candidateB->viewTransposed ? isTransposedCandidateB()
@@ -2416,7 +2429,9 @@ selectRootSMEMPlan(ArrayRef<LogicalRootRewriteAction *> roots,
     return root.alloc.emitOpError(
         "logical root has no supported WGMMA B consumer");
 
-  auto stageType = root.stages.front().getType();
+  auto stageType = root.alloc.getType().getRank() == 2
+                       ? root.alloc.getType()
+                       : root.stages.front().getType();
   auto carrier = cast<ttg::NVMMASharedEncodingAttr>(stageType.getEncoding());
   auto elementType = stageType.getElementType();
   unsigned bits = elementType.getIntOrFloatBitWidth();
@@ -2639,7 +2654,9 @@ FailureOr<LogicalDomainPlan> analyzeLogicalDomains(ModuleOp module) {
     return failure();
 
   for (const LogicalRootRewriteAction &root : plan.roots) {
-    if (root.stages.empty()) {
+    if (cast<ttg::MemDescType>(root.alloc->getResult(0).getType()).getRank() ==
+            3 &&
+        root.stages.empty()) {
       root.alloc->emitOpError("logical domain has no stage views");
       return failure();
     }

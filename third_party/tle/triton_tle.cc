@@ -297,8 +297,10 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<ttg::LocalAllocOp>(memDesc);
            })
       .def("create_local_alloc",
-           [](TritonOpBuilder &self, Type resultTy, Value value) -> Value {
-             return self.create<ttg::LocalAllocOp>(resultTy, value);
+           [](TritonOpBuilder &self, Type resultTy,
+              std::optional<Value> value) -> Value {
+             return self.create<ttg::LocalAllocOp>(resultTy,
+                                                   value.value_or(Value()));
            })
       .def("mark_logical_tensor_descriptor",
            [](TritonOpBuilder &self, Value value,

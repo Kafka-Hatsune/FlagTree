@@ -368,25 +368,22 @@ def _attn_fwd_tle_ws_persistent_barrier(
     desc_o = tl.make_tensor_descriptor(O, [Z * H * N_CTX, HEAD_DIM], [HEAD_DIM, 1], [BM_SPLIT, HEAD_DIM])
 
     q_smem = tle.gpu.alloc(
-        [BM_SPLIT, HEAD_DIM],
+        [Q_STAGE_CAPACITY, BM_SPLIT, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=Q_STAGE_CAPACITY,
     )
     k_smem = tle.gpu.alloc(
-        [BLOCK_N, HEAD_DIM],
+        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=KV_STAGE_CAPACITY,
     )
     v_smem = tle.gpu.alloc(
-        [BLOCK_N, HEAD_DIM],
+        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=KV_STAGE_CAPACITY,
     )
     q_empties = tle.gpu.alloc_barriers(num_barriers=Q_STAGE_CAPACITY, arrive_count=1, init=tle.gpu.READY)
     q_fulls = tle.gpu.alloc_barriers(
@@ -816,25 +813,22 @@ def _attn_fwd_tle_ws_persistent_pipe(
     desc_v = tl.make_tensor_descriptor(V, [Z * H * N_CTX, HEAD_DIM], [HEAD_DIM, 1], [BLOCK_N, HEAD_DIM])
 
     q_smem = tle.gpu.alloc(
-        [BM_SPLIT, HEAD_DIM],
+        [Q_STAGE_CAPACITY, BM_SPLIT, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=Q_STAGE_CAPACITY,
     )
     k_smem = tle.gpu.alloc(
-        [BLOCK_N, HEAD_DIM],
+        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=KV_STAGE_CAPACITY,
     )
     v_smem = tle.gpu.alloc(
-        [BLOCK_N, HEAD_DIM],
+        [KV_STAGE_CAPACITY, BLOCK_N, HEAD_DIM],
         dtype=tl.float16,
         layout=None,
         scope=tle.gpu.smem,
-        capacity=KV_STAGE_CAPACITY,
     )
 
     q_empties = tle.gpu.alloc_barriers(num_barriers=Q_STAGE_CAPACITY, arrive_count=1, init=tle.gpu.READY)
