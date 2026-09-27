@@ -311,6 +311,14 @@ getCommitFieldIndexForTarget(Value target, PipeWriterCommitOp commit) {
       return static_cast<unsigned>(fieldIndex);
     }
 
+    // Tiled fields flatten a logical stage and its tile offset into one index.
+    if (ExactSMEMTile tile = getExactSMEMTile(current)) {
+      if (sawStageIndex || !sameExactSMEMStage(tile, commit.getStage()))
+        return std::nullopt;
+      sawStageIndex = true;
+      current = canonicalizePipeField(tile.getSrc());
+      continue;
+    }
     if (auto index = current.getDefiningOp<ttg::MemDescIndexOp>()) {
       if (sawStageIndex || !sameIndexValue(index.getIndex(), commit.getStage()))
         return std::nullopt;
