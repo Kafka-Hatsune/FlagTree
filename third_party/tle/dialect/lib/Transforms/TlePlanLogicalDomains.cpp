@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifdef __TLE_TILED_SMEM__
+
 #include "tle/dialect/include/Transforms/LogicalDomain.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -504,3 +506,5 @@ void applyLogicalDomainPlan(LogicalDomainPlan &&plan) {
 }
 
 } // namespace mlir::triton::tle
+
+#endif // __TLE_TILED_SMEM__

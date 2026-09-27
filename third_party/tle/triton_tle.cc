@@ -348,6 +348,7 @@ void init_triton_tle_ir(py::module &&m) {
                throw py::value_error(
                    "non-power-of-two tensor descriptors require tle.gpu.copy");
            })
+#ifdef __TLE_TILED_SMEM__
       .def("mark_logical_alloc_candidate",
            [](TritonOpBuilder &self, Value value,
               std::vector<int64_t> logicalShape, int32_t nonPowerAxis) {
@@ -363,6 +364,7 @@ void init_triton_tle_ir(py::module &&m) {
              op->setAttr("tle.storage_plan",
                          builder.getStringAttr("candidate"));
            })
+#endif // __TLE_TILED_SMEM__
       .def("create_tma_copy",
            [](TritonOpBuilder &self, Value src, Value dst,
               std::vector<Value> &indices) {
@@ -474,6 +476,7 @@ void init_triton_tle_ir(py::module &&m) {
              return self.create<tle::LocalPointersOp>(resultTy, memDesc,
                                                       indices);
            })
+#ifdef __TLE_TILED_SMEM__
       .def("mark_logical_pointer_copy",
            [](TritonOpBuilder &self, Value value,
               std::vector<int64_t> logicalShape) {
@@ -484,6 +487,7 @@ void init_triton_tle_ir(py::module &&m) {
              op->setAttr(tle::kLogicalCopyShapeAttr,
                          self.getBuilder().getDenseI64ArrayAttr(logicalShape));
            })
+#endif // __TLE_TILED_SMEM__
 #ifdef __FLAGTREE_COMMON_IR__
       .def("tile_get_string_attr",
            [](TritonOpBuilder &self, const std::string &name) -> Attribute {
@@ -1080,9 +1084,13 @@ void init_triton_tle_ir(py::module &&m) {
              } else {
                llvm_unreachable("Unknown storage type");
              }
-             return ttg::MemDescType::get(shape, elementType, encoding,
-                                          memorySpace, /*mutableMemory=*/true,
-                                          allocShape);
+             auto type = ttg::MemDescType::getChecked(
+                 [&] { return emitError(UnknownLoc::get(context)); }, shape,
+                 elementType, encoding, memorySpace, /*mutableMemory=*/true,
+                 allocShape);
+             if (!type)
+               throw py::value_error("invalid memdesc shape or allocShape");
+             return type;
            });
 }
 
@@ -1211,8 +1219,10 @@ void init_triton_tle_passes(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_lower_async_load",
                      tle::createTritonTleLowerAsyncLoad);
   ADD_PASS_WRAPPER_0("add_lower_wgmma", tle::createTritonTleLowerWGMMA);
+#ifdef __TLE_TILED_SMEM__
   ADD_PASS_WRAPPER_0("add_plan_logical_domains",
                      tle::createTritonTlePlanLogicalDomains);
+#endif // __TLE_TILED_SMEM__
   ADD_PASS_WRAPPER_0("add_lower_pipe_to_nvws",
                      tle::createTritonTleLowerPipeToNvws);
   ADD_PASS_WRAPPER_0("add_lower_barriers", tle::createTritonTleLowerBarriers);

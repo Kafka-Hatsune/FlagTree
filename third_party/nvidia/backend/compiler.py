@@ -276,8 +276,6 @@ class CUDABackend(BaseBackend):
         kernel_init_hooks = mod.get_operation().get_str_attr("tle.raw.kernel_init_hooks")
         metadata["kernel_init_hooks"] = kernel_init_hooks.split(",") if kernel_init_hooks else []
 
-        # Logical copy planning needs the CTA warp count before TTGPU conversion.
-        mod.set_attr("ttg.num-warps", ir.builder(mod.context).get_int32_attr(opt.num_warps))
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.common.add_inliner(pm)
@@ -293,7 +291,10 @@ class CUDABackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         # Plan logical roots after TTIR cleanup and before assigning register layouts.
-        tle.passes.add_plan_logical_domains(pm)
+        if hasattr(tle.passes, "add_plan_logical_domains"):
+            # Logical copy planning needs the CTA warp count before TTGPU conversion.
+            mod.set_attr("ttg.num-warps", ir.builder(mod.context).get_int32_attr(opt.num_warps))
+            tle.passes.add_plan_logical_domains(pm)
         pm.run(mod, 'make_ttir')
         return mod
 

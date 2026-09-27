@@ -409,6 +409,7 @@ def TritonTleLowerPipeToNvws
                            "mlir::triton::nvws::NVWSDialect"];
 }
 
+#ifdef __TLE_TILED_SMEM__
 def TritonTlePlanLogicalDomains
     : Pass<"triton-tle-plan-logical-domains", "mlir::ModuleOp"> {
   let summary =
@@ -430,6 +431,7 @@ def TritonTlePlanLogicalDomains
                            "mlir::triton::TritonDialect",
                            "mlir::triton::tle::TleDialect"];
 }
+#endif // __TLE_TILED_SMEM__
 
 def TritonTleLowerExtractTile
     : Pass<"triton-tle-lower-extract-tile", "mlir::ModuleOp"> {

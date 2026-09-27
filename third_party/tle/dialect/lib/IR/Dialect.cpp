@@ -77,6 +77,14 @@ void TleDialect::initialize() {
 LogicalResult TleDialect::verifyOperationAttribute(Operation *op,
                                                    NamedAttribute attr) {
   StringRef name = attr.getName().getValue();
+#ifndef __TLE_TILED_SMEM__
+  // A disabled planner must not silently ignore logical domains carried by
+  // otherwise ordinary power-of-two memdescs and tensor descriptors.
+  if (name.starts_with("tle.logical_") || name.starts_with("tle.exact_smem_") ||
+      name == "tle.storage_plan" || name == "tle.smem_plan")
+    return op->emitOpError()
+           << name << " requires a build with __TLE_TILED_SMEM__ enabled";
+#endif
   if (name == kExactSMEMShapeAttr) {
     auto alloc = dyn_cast<gpu::LocalAllocOp>(op);
     if (!alloc)

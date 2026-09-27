@@ -459,6 +459,8 @@ def alloc(
             from triton._flagtree_backend import get_active_backend_name
             if get_active_backend_name() != "nvidia":
                 raise ValueError("logical non-power-of-two alloc requires the NVIDIA backend")
+            if not hasattr(_semantic.builder, "mark_logical_alloc_candidate"):
+                raise ValueError("non-power-of-two alloc requires a build with __TLE_TILED_SMEM__ enabled")
             if storage != tle.smem:
                 raise ValueError("logical non-power-of-two alloc is supported only in NVIDIA SMEM")
             if alias is not None:
