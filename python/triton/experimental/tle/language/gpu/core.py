@@ -548,12 +548,12 @@ def alloc(
                 alias_ty = _semantic.builder.get_memdesc_type(storage_shape, elem_type, layout_handle, "smem")
                 tensor_handle = _semantic.builder.create_memdesc_alias(alias_ty, alias.handle, alias_offset_bytes)
             else:
-                mutable_ty = _semantic.builder.get_memdesc_type(storage_shape, elem_type, layout_handle, "smem")
                 if init_value is None:
-                    tensor_handle = _semantic.builder.create_local_alloc(mutable_ty, None)
+                    tensor_handle = _semantic.builder.create_local_alloc(storage_shape, elem_type, layout_handle)
                 elif not isinstance(init_value, tl.tensor):
                     raise ValueError("init_value must be a register tensor")
                 elif len(unwrapped_shape) != 3 or list(init_value.type.shape) == storage_shape:
+                    mutable_ty = _semantic.builder.get_memdesc_type(storage_shape, elem_type, layout_handle, "smem")
                     tensor_handle = _semantic.builder.create_local_alloc(mutable_ty, init_value.handle)
                 else:
                     initializer_shape = list(init_value.type.shape)
@@ -563,7 +563,7 @@ def alloc(
                     if init_value.dtype != dtype or not (broadcast or per_stage):
                         raise ValueError("init_value must match the dtype and padded matrix shape, "
                                          "with an optional leading dimension containing at least shape[0] stages")
-                    tensor_handle = _semantic.builder.create_local_alloc(mutable_ty, None)
+                    tensor_handle = _semantic.builder.create_local_alloc(storage_shape, elem_type, layout_handle)
                     buffer = tle.buffered_tensor(tensor_handle, dtype, storage_shape, storage, layout, _semantic)
                     for stage in builtins.range(unwrapped_shape[0]):
                         value = init_value
