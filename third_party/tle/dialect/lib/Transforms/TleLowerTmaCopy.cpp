@@ -171,7 +171,8 @@ public:
               loc, userBarrier, static_cast<int32_t>(expectBytes.getInt()),
               pred);
         rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
-            op.getLoc(), op.getSrc(), indices, userBarrier, dstMemDesc, pred);
+            op.getLoc(), op.getSrc(), indices, userBarrier, dstMemDesc, pred,
+            CacheModifier::NONE, op.getEvict());
       } else {
         if (op->hasAttr(op.getExpectBytesAttrName()))
           return op.emitOpError("expect_bytes requires an explicit completion "
@@ -210,7 +211,8 @@ public:
 
         // Perform async TMA copy from global to existing shared memory
         rewriter.create<triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp>(
-            op.getLoc(), op.getSrc(), indices, mbarrierAlloc, dstMemDesc, pred);
+            op.getLoc(), op.getSrc(), indices, mbarrierAlloc, dstMemDesc, pred,
+            CacheModifier::NONE, op.getEvict());
 
         // Wait for completion and invalidate barrier
         Value phase = rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
@@ -247,7 +249,7 @@ public:
       // Perform async TMA copy from shared to global memory
       auto tmaStore =
           rewriter.create<triton::nvidia_gpu::AsyncTMACopyLocalToGlobalOp>(
-              op.getLoc(), op.getDst(), indices, op.getSrc());
+              op.getLoc(), op.getDst(), indices, op.getSrc(), op.getEvict());
       tmaStore->setAttr(kTleTMAStoreExplicitCommitAttr, rewriter.getUnitAttr());
       rewriter.create<TMAStoreCommitGroupOp>(loc);
 

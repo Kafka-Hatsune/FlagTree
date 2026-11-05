@@ -378,12 +378,12 @@ void init_triton_tle_ir(py::module &&m) {
           "create_tma_copy",
           [](TritonOpBuilder &self, Value src, Value dst,
              std::vector<Value> &indices, py::object barrier,
-             int32_t expectBytes) {
+             int32_t expectBytes, tt::EvictionPolicy evict) {
 #ifdef __HCU__
             if (!barrier.is_none() || expectBytes > 0)
               throw py::value_error(
                   "TMA completion barrier is only supported on NVIDIA backend");
-            self.create<ttg::TMACopyOp>(src, dst, indices);
+            self.create<ttg::TMACopyOp>(src, dst, indices, evict);
 #else
              auto &builder = self.getBuilder();
              Value barrierValue;
@@ -393,20 +393,24 @@ void init_triton_tle_ir(py::module &&m) {
              if (expectBytes > 0)
                expectBytesAttr = builder.getI32IntegerAttr(expectBytes);
              self.create<ttg::TMACopyOp>(src, dst, indices, barrierValue,
-                                         expectBytesAttr);
+                                         expectBytesAttr, evict);
 #endif
             return;
-          })
+          },
+          py::arg("src"), py::arg("dst"), py::arg("indices"),
+          py::arg("barrier"), py::arg("expect_bytes"),
+          py::arg("eviction_policy") = tt::EvictionPolicy::NORMAL)
       .def(
           "create_tma_copy",
           [](TritonOpBuilder &self, Value src, Value dst,
              std::vector<Value> &indices, py::object barrier,
-             int32_t expectBytes, std::vector<int64_t> copyShape) {
+             int32_t expectBytes, std::vector<int64_t> copyShape,
+             tt::EvictionPolicy evict) {
 #ifdef __HCU__
             if (!barrier.is_none() || expectBytes > 0)
               throw py::value_error(
                   "TMA completion barrier is only supported on NVIDIA backend");
-            auto op = self.create<ttg::TMACopyOp>(src, dst, indices);
+            auto op = self.create<ttg::TMACopyOp>(src, dst, indices, evict);
 #else
              Value barrierValue;
              if (!barrier.is_none())
@@ -415,11 +419,14 @@ void init_triton_tle_ir(py::module &&m) {
              if (expectBytes > 0)
                expectBytesAttr = self.getBuilder().getI32IntegerAttr(expectBytes);
              auto op = self.create<ttg::TMACopyOp>(
-                 src, dst, indices, barrierValue, expectBytesAttr);
+                 src, dst, indices, barrierValue, expectBytesAttr, evict);
 #endif
             op->setAttr(tle::kLogicalCopyShapeAttr,
                         self.getBuilder().getDenseI64ArrayAttr(copyShape));
-          })
+          },
+          py::arg("src"), py::arg("dst"), py::arg("indices"),
+          py::arg("barrier"), py::arg("expect_bytes"), py::arg("copy_shape"),
+          py::arg("eviction_policy") = tt::EvictionPolicy::NORMAL)
       .def("create_local_load",
            [](TritonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
              return self.create<ttg::LocalLoadOp>(resultTy, memDesc);

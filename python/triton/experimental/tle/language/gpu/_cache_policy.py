@@ -39,6 +39,10 @@ from ._policy_base import DESCRIPTOR, POINTER
 #: drives both descriptor copies and supported block-pointer loads, so it
 #: appears on both paths without subclassing the unrelated LSU policy.
 _BACKEND_POLICIES = {
+    "nvidia": ("._nvidia_cache_policy", {
+        POINTER: ("CachePolicy", ),
+        DESCRIPTOR: ("CachePolicy", ),
+    }),
 }
 
 _NOT_SUPPORTED = "copy cache_policy is not supported by this backend/path"
