@@ -82,7 +82,44 @@ def _summarize_statistics(times, quantiles, return_mode):
 
 
 # flagtree flagtune: Make Triton's fixed replay count configurable while preserving its default of 10.
-def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mode="mean", n_retries=10):
+
+
+def _reset_persisting_l2_cache(di):
+    import ctypes
+
+    for lib_name, sym_name in (("libcuda.so.1", "cuCtxResetPersistingL2Cache"), ("libmusa.so.1",
+                                                                                 "muCtxResetPersistingL2Cache")):
+        try:
+            fn = getattr(ctypes.CDLL(lib_name), sym_name, None)
+        except OSError:
+            fn = None
+        if fn is not None:
+            di.synchronize()
+            fn()
+            return
+
+
+def _get_cold_sweep_buffers(device_type=None, mib=512):
+    import torch
+
+    dev = "musa" if (device_type and "musa" in device_type.lower()) or hasattr(
+        torch, "musa") and torch.musa.is_available() else "cuda"
+    elems = int(mib) * 262144
+    return (
+        torch.ones(elems, dtype=torch.float32, device=dev),
+        torch.empty(elems, dtype=torch.float32, device=dev),
+    )
+
+
+def _run_cold_sweep(buffers, di):
+    src_buf, dst_buf = buffers
+    _reset_persisting_l2_cache(di)
+    dst_buf.copy_(src_buf)
+    src_buf.copy_(dst_buf)
+
+
+def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mode="mean", n_retries=10,
+                       cold_cache=None):
     """
     Benchmark the runtime of the provided function.
 
@@ -147,7 +184,12 @@ def do_bench_cudagraph(fn, rep=20, grad_to_none=None, quantiles=None, return_mod
         torch.cuda.synchronize()
         # measure time and return
         ret = []
+        use_cold = os.environ.get("TRITON_BENCH_COLD_CACHE") == "1" if cold_cache is None else bool(cold_cache)
+        cold_buffers = _get_cold_sweep_buffers(
+            mib=int(os.environ.get("TRITON_BENCH_COLD_MIB", "512"))) if use_cold else None
         for _ in range(n_retries):
+            if cold_buffers is not None:
+                _run_cold_sweep(cold_buffers, torch.cuda)
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
@@ -182,7 +224,8 @@ def _get_runtime_driver_active(device_type: str | None):
     return _get_backend_driver(backend_name)
 
 
-def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_mode="mean", device_type=None):
+def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_mode="mean", device_type=None,
+             cold_cache=None):
     """
     Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
     the 20-th and 80-th performance percentile.
@@ -213,14 +256,20 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     fn()
     di.synchronize()
 
-    cache = runtime_driver_active.get_empty_cache_for_benchmark()  # flagtree
+    use_cold = os.environ.get("TRITON_BENCH_COLD_CACHE") == "1" if cold_cache is None else bool(cold_cache)
+    cold_buffers = _get_cold_sweep_buffers(device_type, mib=int(os.environ.get("TRITON_BENCH_COLD_MIB",
+                                                                               "512"))) if use_cold else None
+    cache = None if use_cold else runtime_driver_active.get_empty_cache_for_benchmark()  # flagtree
 
     # Estimate the runtime of the function
     start_event = di.Event(enable_timing=True)
     end_event = di.Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
-        runtime_driver_active.clear_cache(cache)  # flagtree
+        if cold_buffers is not None:
+            _run_cold_sweep(cold_buffers, di)
+        else:
+            runtime_driver_active.clear_cache(cache)  # flagtree
         fn()
     end_event.record()
     di.synchronize()
@@ -243,7 +292,10 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
             for x in grad_to_none:
                 x.grad = None
         # we clear the L2 cache before each run
-        runtime_driver_active.clear_cache(cache)  # flagtree
+        if cold_buffers is not None:
+            _run_cold_sweep(cold_buffers, di)
+        else:
+            runtime_driver_active.clear_cache(cache)  # flagtree
         # record time of `fn`
         start_event[i].record()
         fn()

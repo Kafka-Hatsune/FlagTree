@@ -1,0 +1,37 @@
+module {
+  tt.func public @silu_and_mul_kernel_kernel_rank_1(%in0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %in1_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %out0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %s0: i32 {tt.divisibility = 16 : i32}, %num_tasks: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0> : tensor<512xi64>
+    %x_silu = arith.constant dense<0.000000e+00> : tensor<512xf32>
+    %x_silu_0 = arith.constant dense<1.000000e+00> : tensor<512xf32>
+    %offset0 = arith.constant 512 : i64
+    %pid = tt.get_program_id x : i32
+    %pid_1 = arith.extsi %pid : i32 to i64
+    %offset0_2 = arith.muli %pid_1, %offset0 : i64
+    %offset0_3 = arith.trunci %offset0_2 : i64 to i32
+    %in0_bptr = arith.extsi %s0 : i32 to i64
+    %in0_bptr_4 = arith.extsi %offset0_3 : i32 to i64
+    %in0 = tt.splat %in0_ptr : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %in0_5 = tt.splat %in0_bptr_4 : i64 -> tensor<512xi64>
+    %in0_6 = tt.make_range {end = 512 : i32, start = 0 : i32} : tensor<512xi32>
+    %in0_7 = arith.extsi %in0_6 : tensor<512xi32> to tensor<512xi64>
+    %in0_8 = arith.addi %in0_5, %in0_7 : tensor<512xi64>
+    %in0_9 = tt.addptr %in0, %in0_8 : tensor<512x!tt.ptr<f32>>, tensor<512xi64>
+    %in0_10 = arith.cmpi sge, %in0_8, %cst : tensor<512xi64>
+    %in0_11 = tt.splat %in0_bptr : i64 -> tensor<512xi64>
+    %in0_12 = arith.cmpi slt, %in0_8, %in0_11 : tensor<512xi64>
+    %in0_13 = arith.andi %in0_10, %in0_12 : tensor<512xi1>
+    %in0_14 = tt.load %in0_9, %in0_13 cacheModifier = lu : tensor<512x!tt.ptr<f32>>
+    %in1 = tt.splat %in1_ptr : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %in1_15 = tt.addptr %in1, %in0_8 : tensor<512x!tt.ptr<f32>>, tensor<512xi64>
+    %in1_16 = tt.load %in1_15, %in0_13 cacheModifier = lu : tensor<512x!tt.ptr<f32>>
+    %x_silu_17 = arith.subf %x_silu, %in0_14 : tensor<512xf32>
+    %x_silu_18 = math.exp %x_silu_17 : tensor<512xf32>
+    %x_silu_19 = arith.addf %x_silu_18, %x_silu_0 : tensor<512xf32>
+    %x_silu_20 = arith.divf %in0_14, %x_silu_19 : tensor<512xf32>
+    %out0 = arith.mulf %x_silu_20, %in1_16 : tensor<512xf32>
+    %0 = tt.splat %out0_ptr : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %1 = tt.addptr %0, %in0_8 : tensor<512x!tt.ptr<f32>>, tensor<512xi64>
+    tt.store %1, %out0, %in0_13 : tensor<512x!tt.ptr<f32>>
+    tt.return
+  }
+}

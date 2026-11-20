@@ -1,0 +1,49 @@
+module {
+  tt.func public @square_func_kernel_rank_2(%in0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %out0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %s0: i32 {tt.divisibility = 16 : i32}, %s1: i32 {tt.divisibility = 16 : i32}, %num_tasks: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c4096_i64 = arith.constant 4096 : i64
+    %c0_i64 = arith.constant 0 : i64
+    %cst = arith.constant dense<0> : tensor<1x2048xi64>
+    %num_tiles1 = arith.constant 2047 : i32
+    %num_tiles1_0 = arith.constant 2048 : i32
+    %offset1 = arith.constant 2048 : i64
+    %pid = tt.get_program_id x : i32
+    %pid_1 = arith.extsi %pid : i32 to i64
+    %num_tiles1_2 = arith.addi %s1, %num_tiles1 : i32
+    %num_tiles1_3 = arith.divsi %num_tiles1_2, %num_tiles1_0 : i32
+    %tile_id1 = arith.extsi %num_tiles1_3 : i32 to i64
+    %tile_id1_4 = arith.remsi %pid_1, %tile_id1 : i64
+    %tile_id = arith.divsi %pid_1, %tile_id1 : i64
+    %offset0 = arith.trunci %tile_id : i64 to i32
+    %offset1_5 = arith.muli %tile_id1_4, %offset1 : i64
+    %offset1_6 = arith.trunci %offset1_5 : i64 to i32
+    %in0_bptr = arith.extsi %s0 : i32 to i64
+    %in0_bptr_7 = arith.extsi %s1 : i32 to i64
+    %in0_bptr_8 = arith.extsi %offset0 : i32 to i64
+    %in0_bptr_9 = arith.extsi %offset1_6 : i32 to i64
+    %in0 = tt.splat %in0_ptr : !tt.ptr<f32> -> tensor<1x2048x!tt.ptr<f32>>
+    %in0_10 = tt.splat %in0_bptr_9 : i64 -> tensor<2048xi64>
+    %in0_11 = tt.make_range {end = 2048 : i32, start = 0 : i32} : tensor<2048xi32>
+    %in0_12 = arith.extsi %in0_11 : tensor<2048xi32> to tensor<2048xi64>
+    %in0_13 = arith.addi %in0_10, %in0_12 : tensor<2048xi64>
+    %in0_14 = tt.expand_dims %in0_13 {axis = 0 : i32} : tensor<2048xi64> -> tensor<1x2048xi64>
+    %in0_15 = tt.addptr %in0, %in0_14 : tensor<1x2048x!tt.ptr<f32>>, tensor<1x2048xi64>
+    %in0_16 = arith.cmpi sge, %in0_bptr_8, %c0_i64 : i64
+    %in0_17 = arith.cmpi slt, %in0_bptr_8, %in0_bptr : i64
+    %in0_18 = arith.andi %in0_16, %in0_17 : i1
+    %in0_19 = tt.splat %in0_18 : i1 -> tensor<1x2048xi1>
+    %in0_20 = arith.cmpi sge, %in0_14, %cst : tensor<1x2048xi64>
+    %in0_21 = tt.splat %in0_bptr_7 : i64 -> tensor<1x2048xi64>
+    %in0_22 = arith.cmpi slt, %in0_14, %in0_21 : tensor<1x2048xi64>
+    %in0_23 = arith.andi %in0_20, %in0_22 : tensor<1x2048xi1>
+    %in0_24 = arith.andi %in0_19, %in0_23 : tensor<1x2048xi1>
+    %in0_25 = tt.load %in0_15, %in0_24 : tensor<1x2048x!tt.ptr<f32>>
+    %out0 = arith.mulf %in0_25, %in0_25 : tensor<1x2048xf32>
+    %0 = tt.splat %out0_ptr : !tt.ptr<f32> -> tensor<1x2048x!tt.ptr<f32>>
+    %1 = arith.muli %in0_bptr_8, %c4096_i64 : i64
+    %2 = tt.splat %1 : i64 -> tensor<1x2048xi64>
+    %3 = arith.addi %2, %in0_14 : tensor<1x2048xi64>
+    %4 = tt.addptr %0, %3 : tensor<1x2048x!tt.ptr<f32>>, tensor<1x2048xi64>
+    tt.store %4, %out0, %in0_24 cacheModifier = cs : tensor<1x2048x!tt.ptr<f32>>
+    tt.return
+  }
+}

@@ -1,0 +1,2726 @@
+{
+  "nv": {
+    "abs": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.abs_func_kernel_rank_2": [
+            1408,
+            "574357023ab383e809d8e1c36005325bdd41cf757e6ed94830d14dececa92296"
+          ]
+        },
+        "hinted": {
+          ".text.abs_func_kernel_rank_2": [
+            1664,
+            "2e0414e0e23d62adc62041610ac2a6034eeb0185796ddaf809d319e76aa8c504"
+          ]
+        }
+      }
+    },
+    "ceil": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.ceil_func_kernel_rank_2": [
+            1408,
+            "32a7c49e9e9c04643be0e7291331249889b55b2ffabf1764d44747579bac3c94"
+          ]
+        },
+        "hinted": {
+          ".text.ceil_func_kernel_rank_2": [
+            1664,
+            "94358cc0e07d9878524cae507a52f83b53d02dbb59574785594af149044303ac"
+          ]
+        }
+      }
+    },
+    "cos": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.cos_func_kernel_rank_2": [
+            6784,
+            "d2e64298f46dc710c084623bf7e1e30a2caf6777cca569171a675a5fde34b392"
+          ]
+        },
+        "hinted": {
+          ".text.cos_func_kernel_rank_2": [
+            6912,
+            "b8bb7a279189caca760aa4b156d70aa2962f0972d8bae98ad789f8f391fb5eeb"
+          ]
+        }
+      }
+    },
+    "floor": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.floor_func_kernel_rank_2": [
+            1408,
+            "fbd7dae7b364f2a67125aa5ab3fa72356144f67146566a762911bb7b9b0b335f"
+          ]
+        },
+        "hinted": {
+          ".text.floor_func_kernel_rank_2": [
+            1664,
+            "07595e43ee368d4f1c6db788e85070fede9727a140ca73285e6de08b2eda1a9f"
+          ]
+        }
+      }
+    },
+    "gelu": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.gelu_none_kernel_rank_2": [
+            3456,
+            "87790d5cccee955afe62380c6f0c10f72660ddc4d28d2f108cc4c4bf2dc7b677"
+          ]
+        },
+        "hinted": {
+          ".text.gelu_none_kernel_rank_2": [
+            3584,
+            "6cfef2175d4084c392c6e2032efacfeabb93d5e0d5261f76ae394ae3c5d9486f"
+          ]
+        }
+      }
+    },
+    "neg": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.neg_func_kernel_rank_2": [
+            1408,
+            "697418c47687f0d27ccc1297442f3529761e8572be2ebe68ee33c9fdd7369e80"
+          ]
+        },
+        "hinted": {
+          ".text.neg_func_kernel_rank_2": [
+            1664,
+            "889a64994fdf7e4b7fdfb8d36a55b9ffa9075904d542679ccee95f39b6f69c96"
+          ]
+        }
+      }
+    },
+    "relu": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.relu_forward_kernel_rank_2": [
+            1408,
+            "b912bb6c84eec685319502e4e7dc3af4b2ef2545cb4e660be6ccb163f93ee8af"
+          ]
+        },
+        "hinted": {
+          ".text.relu_forward_kernel_rank_2": [
+            1664,
+            "7e816fb52da1cadbcec3f54a476ffc18337a8d81dc2c7614bee4fb56faadd85a"
+          ]
+        }
+      }
+    },
+    "rsqrt": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.rsqrt_func_kernel_rank_2": [
+            1920,
+            "fbd6d2bdd140e3eb40937f9f79cbd73e119b76baa59382deab40e2efec7417bf"
+          ]
+        },
+        "hinted": {
+          ".text.rsqrt_func_kernel_rank_2": [
+            2176,
+            "c3cbef86dfcc536c7348591c608eda480230b2fcccad5387a6e852ae55a52bbb"
+          ]
+        }
+      }
+    },
+    "sin": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.sin_func_kernel_rank_2": [
+            6656,
+            "fee5b5aef3e17dbd43e74dc533b0c500f1628528ffb7431384021dd17759323e"
+          ]
+        },
+        "hinted": {
+          ".text.sin_func_kernel_rank_2": [
+            6784,
+            "b1c7bad29535d38ccb63fb42a8d6fb161872febacece28175ba285a4f66d397d"
+          ]
+        }
+      }
+    },
+    "square": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        512
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        4096,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text.square_func_kernel_rank_2": [
+            1408,
+            "776ab8cae4349764e27298dee290ec9902aed7f77cea8e43c03d8531c4740c3c"
+          ]
+        },
+        "hinted": {
+          ".text.square_func_kernel_rank_2": [
+            1664,
+            "0e085aae03093918d7ce61780ddeee7791c36ea0233dd33ec3d9ee09b1aed330"
+          ]
+        }
+      }
+    }
+  },
+  "mthreads": {
+    "abs": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1128,
+            "edc2525dd2ef4a9f78c8f1254ec983a5d723ebd736546d1eb5a494ed83ba150a"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1128,
+            "8e5ecb8358717358ee4716f7fca025b6406e71e7fe9435091c3b798ac580089a"
+          ]
+        }
+      }
+    },
+    "ceil": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1256,
+            "089b6a1fcce10fe98bf1884190a5fda4b289452ccce0b98eea4c770a6c39f9e6"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1256,
+            "62f5bdfa18a769e0d0514d72df0d31f1125c2a2a8018904de0c1d6aa26c70635"
+          ]
+        }
+      }
+    },
+    "cos": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1360,
+            "175bb0f5d7f439c8b459a31d34faa0020ec888cc1a8063791bb63da7a87edfd6"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1456,
+            "a2da149fd4806376a39357c991d7b5f6c02a5c86ef63b5de2d3f4bc6ee782b92"
+          ]
+        }
+      }
+    },
+    "exp": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1616,
+            "deb421a67b56380599c0d0b2e1d675290f036b5c1454d38cb906bef0f2843a92"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1616,
+            "a3466244df8cbf1e9540e4c55d3d51cab1959bf5d0feb0b71f502f58fe506628"
+          ]
+        }
+      }
+    },
+    "floor": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1160,
+            "9443799263f94b6a74133446c5755a28bade8224622602448f0ff877db729578"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1160,
+            "69609fb454310d1da6c0e80120d0460884cad4543749a0bccf15a392e13db5f5"
+          ]
+        }
+      }
+    },
+    "gelu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1036,
+            "1613f59907541f380d29af397612c7d057f91a996dc4b35d921d32ee56d2abc2"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1036,
+            "8f421054df29e6c58b99ea95ca4b10c88e3b67557c3558120518b7d0f7e00dbc"
+          ]
+        }
+      }
+    },
+    "log1p": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            5232,
+            "afce44fc21156e167389e5ae4db5bb7b95735a5fa0f7cf99bebbff0fd1ad5c35"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            5232,
+            "3faadcb3ae0f6b7a7c9b3879540c345551c16f260ac4ccc5272c5eb3a1ca7770"
+          ]
+        }
+      }
+    },
+    "neg": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1044,
+            "a37375afc85ef7ee2c143aae52a66787ec07baf56107e7dee1e17b217e090b4b"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1044,
+            "146e5575102083e0d40d542e0bc63148f3404e134799855d9469c13298c0b095"
+          ]
+        }
+      }
+    },
+    "relu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1144,
+            "0b6da96fb648ff714860f713e4a5a5897ebdfafa706319d8b2a713099e7eb6dd"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1144,
+            "8614d3050b108c8f126c8de8ed48f4ec5bbf26938efe3a552ac17b23df369c6c"
+          ]
+        }
+      }
+    },
+    "rsqrt": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1692,
+            "bacb8c5e43fb5da219794f091a3445784981517be1f766644921cee68f391937"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1692,
+            "898703d9c66d4f5331468c4b739a1176e1b37d393858eca83f94a1875658e3a6"
+          ]
+        }
+      }
+    },
+    "sigmoid": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1680,
+            "037ded528fdfe2b5d2534f674de45a53d639d651cc8f91d6f0a6da57c1a810ca"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1680,
+            "b1dab4a47ab5f836a02fb5aca357a9bf9e0da02feb8bc734330037d95a7173b2"
+          ]
+        }
+      }
+    },
+    "silu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            2584,
+            "1f37fcdb86abbe033f475c78798aa627d6001a6d89587618f784ca441bf9252d"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            2584,
+            "069aa6e6f0fb6cd09172b1540a12e07373bc2c2a26e975682bf979a34084b13c"
+          ]
+        }
+      }
+    },
+    "sin": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1748,
+            "f291952fab54fcce6c0470056e68cd0af20ff77c529b9c298a9ae71582ad52ce"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1748,
+            "c8bf2f6c145254f6b8e9d02049a5bafb571e876574a0e60bbb05d798d0243340"
+          ]
+        }
+      }
+    },
+    "square": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        12288,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": false
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1056,
+            "9762276d6e651e065a7b56244d84b1a42cc3a2378cb031df642d5a70e5d0d0ec"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1056,
+            "a85ea168b474f6dd8e6b2996885668a651af6cfc14ee8411ab02b9886e359fa8"
+          ]
+        }
+      }
+    },
+    "silu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        12288,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        36864,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": true
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            1252,
+            "fcfefceb87dccc1fd83ec86c9a6b8db5b813d728a68893358a728ca94b41533d"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            1252,
+            "a74d84fe679dc04af3500a8183fa1d595bb0c88aab7089071b393ff5de827dd0"
+          ]
+        }
+      }
+    },
+    "gelu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        12288,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks",
+        "tiles_per_cta"
+      ],
+      "grid": [
+        36864,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4,
+        "enable_llc_opt": true
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            2144,
+            "de08d5d2ec41eb933a65d44b9e742a2a410c009a529e784da698b7ff042752d2"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            2144,
+            "b6f923db60a89d028fc0c2233ca804445233800b2f59b14ad3b5c91e3165b51e"
+          ]
+        }
+      }
+    }
+  },
+  "metax": {
+    "abs": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1736,
+              "497b881572fe6c7bb32ee8474eb6b872e605609adaad91c14febddec9dc36ecc"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2024,
+              "4a73da0e489e898e752039c8c4f189f801577ea21d9f217c325c6aaf1a487bb6"
+            ]
+          }
+        }
+      }
+    },
+    "ceil": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1968,
+              "d701841d397a06e4fb79a6d2200f259404404a17e5cf842060e76b06435794c3"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2272,
+              "3480c5fac9bdf712e874882e8d275a0c8965ced2302e4519652a7e667156f457"
+            ]
+          }
+        }
+      }
+    },
+    "cos": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3296,
+              "014d52f8cfbce3a13911c7eba166afcb2e44a22af6d4ceaded825c2853f96032"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3600,
+              "ff1ce29924b29e4ec4006d035e838b53c16e2fa51b59cf96015fc3230d695988"
+            ]
+          }
+        }
+      }
+    },
+    "exp": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1768,
+              "a0ceaac5776e5789d6ddc9867d9081f76deabf52d27fe4ef4b636155e363f179"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2048,
+              "0625a56b50434f7109e55306999758ccb1b1d2a4bce2c7a2d7587a1f8ad65f37"
+            ]
+          }
+        }
+      }
+    },
+    "floor": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1968,
+              "bf508bd7b0d3b256b7b92384b4d34c8d8d45a8bfb31b10650cdba673302c8254"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2272,
+              "222748eb5b4043b55f7b432a1acf5a84023c5ffb474cd264902823cc90b1e7f6"
+            ]
+          }
+        }
+      }
+    },
+    "gelu": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3296,
+              "29e56b4b55609f744ebea42740f870bc4a0dabca0b2296013e68aecca32aca68"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3600,
+              "7cb1a87359826318f715e6fb3247a150ec28aa97a1da1114429514c9d4176d7a"
+            ]
+          }
+        }
+      }
+    },
+    "log1p": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1816,
+              "a80beb27a539d3ee70ff298c3f8305a4b2f5517a96cdd5822c243d9a6439d45d"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2120,
+              "962eaf7e2bf7908c98b21d508685c3becb7eed05b4a5b38adf6e226f81dfb646"
+            ]
+          }
+        }
+      }
+    },
+    "neg": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1736,
+              "81f116b0716684251e6cdcf242a7ee2d1b0118cd6f18e45182d8cccb1654222a"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2024,
+              "1f68f92606aa66775c670524bd696edc828888ea03a6e6d428dda44c2a420afb"
+            ]
+          }
+        }
+      }
+    },
+    "relu": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1768,
+              "cf796a0bbcf4bc33a3e5920b49cd854fd21f05e61fa3d56a845198acc64ad87b"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2056,
+              "b5c4017d13392fc66bc7dd562e5a72fa0d91794af819e037f2eeccb64abd6c7d"
+            ]
+          }
+        }
+      }
+    },
+    "rsqrt": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2040,
+              "df698c3a6fb1e0e270643865fc4bc840a14c40902bd22f1735dc4171225d3775"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2344,
+              "7fe2558ea7e730590619fcc43ff0b9bbb91eb0962b70af0b397b1f89d6ada8e5"
+            ]
+          }
+        }
+      }
+    },
+    "sigmoid": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2232,
+              "e7f593861603b0f31654d20428f64ce0316c38cda174abc793b75387c7bb227d"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2520,
+              "4ad8a45ab8d3adaf94ce077b76c6ff611caedb5f0001777f2845662acd05cb1c"
+            ]
+          }
+        }
+      }
+    },
+    "silu": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2240,
+              "1b6caa80149d957fff55b7c2ef2999e90b341f4792a2b4f2ecbf238344637e67"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2496,
+              "6abfc3f570bb346af68f223ebdce455a4a159dfe59cc7918b24869f94af8fde4"
+            ]
+          }
+        }
+      }
+    },
+    "sin": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3288,
+              "20d09deef5c7b33d8608ba4ba7654e943d00b1654ef40891e98aa62abfdad970"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3592,
+              "2b51ebff1fe2207c376c92d132d53d0d8afee78479753e81a2c1b170373dd763"
+            ]
+          }
+        }
+      }
+    },
+    "square": {
+      "library": "FlagGems",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              1712,
+              "de357f72e56c6be230a72c77cfcdd6873a818c1a3af66fe00f1fbb0759acfa5d"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2016,
+              "04e95b3d4c8d77a24f3da8ed691a21acb50f2d5ddc9751f889a34e9f55c79b66"
+            ]
+          }
+        }
+      }
+    },
+    "silu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2472,
+              "71d89ac1d6648dab6e0b364de39a11e6b8051f497344c0e982e9391552163da6"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              2960,
+              "cf29e44f7a3f7df63a78b0e3e374f7fc052d949a9415f51b79b788293396f041"
+            ]
+          }
+        }
+      }
+    },
+    "gelu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        4096,
+        4096
+      ],
+      "layout": "stride8",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        8192,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              3528,
+              "0663b172db0a26e9e4582087a7febfa16b9c8ccf05909341369ac687e12d614f"
+            ]
+          }
+        },
+        "hinted": {
+          "maca-mxc-metax-macahca--xcore1000": {
+            ".text": [
+              4112,
+              "bc1a2fde172bcad7ef5f476b020108848c8f905f1a3056fd923ce369a74a307c"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "hcu": {
+    "abs": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            384,
+            "e16b170f086e71516fa9d5336f27821fc70131bdff8edcde596a7e78cc68f9d4"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            384,
+            "096699fa9cc7358f6378b6024d92722621e50adfd32b7dbd0c8e331d6cfa361e"
+          ]
+        }
+      }
+    },
+    "ceil": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "7833f56a15c4c0967e22240a42e015dc40283c51e901f86b6409e7b6ce2429f9"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "ed521f3d4b647ecd7e19a8fa359613ea14ab28d692c80f81412184515d6b7a9d"
+          ]
+        }
+      }
+    },
+    "exp": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            400,
+            "2d89bce603a888dd98f41f9c77b51631ba5eb73d4532686abd9f13bcf7bc0042"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            400,
+            "b35c6e9691fcd021fe39554081d71f49ecdb7ddc990a4d47256f4cf7298805e2"
+          ]
+        }
+      }
+    },
+    "floor": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "6c11e3c3ded41d2dd737e1f7957a74cc0c1b87615e5eca8a5e982ccef1e8398e"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "67efb151ceaffd898cb7787d3af14007ca55cd6977b9b894161b1b2bfea388af"
+          ]
+        }
+      }
+    },
+    "frac": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            384,
+            "f7622446593f3abb6e6fa4a8397b64cac758199f4aeae74fd7918197c3484a3c"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            384,
+            "0216dd85c64e5db12f7f5088010c2a2f0d7d5f0b20a8fdb43dba63f0fb0689ef"
+          ]
+        }
+      }
+    },
+    "neg": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "e3813eec43f665adfa2267f2bef6ee0ab22797c510bf4075f0221950a50fe31a"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "5b434e7c54d3d9205aac23aa3132664e29d2867fc5bbc13f7d8b8e08f8a5a015"
+          ]
+        }
+      }
+    },
+    "relu": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            384,
+            "8da2ccfb49a16ededc056aee2ecca2c6b9584baac64d3ff7d11ca2129acc919c"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            384,
+            "a75f2e7dcbde39ed2c9ea8fef6da7fe9dfb6641b60f8f913bb686aa274ad9919"
+          ]
+        }
+      }
+    },
+    "sqrt": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "957366cc88861aba40bd605863adab68dda31d22022589a0edfe5d933c8c37bb"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "72ac143c955bd7bcd56eeb26aa8c9d8e434d6cd36be3966ced7562cb18d03386"
+          ]
+        }
+      }
+    },
+    "square": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "e8e2cf269e499f69578e81bb3c4dafbc80c493e58f5fffa21dadf749fb1ef421"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "3b58edfbc5e994a496a5256e9cb7463f9e7ff7eb86bf82b9852294f190bab576"
+          ]
+        }
+      }
+    },
+    "trunc": {
+      "library": "FlagGems",
+      "shape": [
+        32768,
+        4096
+      ],
+      "layout": "rowview",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "s1",
+        "num_tasks"
+      ],
+      "grid": [
+        65536,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 8
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            368,
+            "98d37e49cdc84e23733cb79ca330f9f0d38ca5ef3d3dd2741551167ab28a1b97"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            368,
+            "7638e7bc4dae018682d2e6cdb4b2e40def2cfd519a4609000276fd02f84c6f3c"
+          ]
+        }
+      }
+    }
+  },
+  "ppu": {
+    "abs": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.abs_func_kernel_rank_1": [
+            440,
+            "594718e82d8d67112ea6e3db99b084cc60f7a1cb12207e819d6964db9cd17568"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.abs_func_kernel_rank_1": [
+            440,
+            "01fa8528969774e1dd3fca53d2cbc54cd808f2d5fd21a571f1cbacff9ac10658"
+          ]
+        }
+      }
+    },
+    "ceil": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.ceil_func_kernel_rank_1": [
+            568,
+            "df4e93737aa5be2dc7c7161d6a5fa403dde656a7d57c465b8325d93d5ecb367f"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.ceil_func_kernel_rank_1": [
+            568,
+            "d8343bbb8b7d7f12b90ae0873c94671d7ddb980ea7d1278fa7c79071f844592f"
+          ]
+        }
+      }
+    },
+    "cos": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.cos_func_kernel_rank_1": [
+            6784,
+            "3a5350c4673a2735b44ba95f7b5fec22c9a90ad446a454b10202f214eb694c0e"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.cos_func_kernel_rank_1": [
+            6784,
+            "72d3c76093d7c12f356eb963d1a2b2010c191c2b0351bb434454b01565bdcc23"
+          ]
+        }
+      }
+    },
+    "exp": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.exp_func_kernel_rank_1": [
+            648,
+            "ab4fdf2adb911f71d0b71a1881d36b7153509fb0b850ce82e6e2bb1990000362"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.exp_func_kernel_rank_1": [
+            648,
+            "3d279d83d18449ee409f9d1ee8e9c7e5d09adcda2973e3237f019c70abcb234b"
+          ]
+        }
+      }
+    },
+    "floor": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.floor_func_kernel_rank_1": [
+            568,
+            "00c202f1f49eda80a2705570779378b6c0c3b7c16cec317673998340249daac9"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.floor_func_kernel_rank_1": [
+            568,
+            "07b4a83f62643d367fa9cbe11415ff142c74906785a2959adc6a1808fbba8ec1"
+          ]
+        }
+      }
+    },
+    "gelu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.gelu_none_kernel_rank_1": [
+            1976,
+            "38d471379966c04f5414168a360b86da653fab0fa77c28794c50f400094b6c4c"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.gelu_none_kernel_rank_1": [
+            1976,
+            "1f524ffcf887284c5a347645e02aedca9b9eec3a9fb5f25d04318ace7a6a41b2"
+          ]
+        }
+      }
+    },
+    "neg": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.neg_func_kernel_rank_1": [
+            440,
+            "0b37a4c6eeaacbe4e40349d9e0cea34190235c48a42722d11ac1b4e37a88dbb4"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.neg_func_kernel_rank_1": [
+            440,
+            "374003a63a30eabd4fc7002d2b78fa8ef1065a614902f5178a5ba155e72d4490"
+          ]
+        }
+      }
+    },
+    "relu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.relu_forward_kernel_rank_1": [
+            440,
+            "91b38abe45e54384634a3d6e422075373b456f0aa2599d3373f641829e672d06"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.relu_forward_kernel_rank_1": [
+            440,
+            "22176e0dfcc6bc815298f01b930dd92fa2b95c0a7d8563812e285e4b8bd2c4c7"
+          ]
+        }
+      }
+    },
+    "rsqrt": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.rsqrt_func_kernel_rank_1": [
+            1096,
+            "027a815c7bf572bc622993ff9099db82033793b28565128bd4664dc1423be70b"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.rsqrt_func_kernel_rank_1": [
+            1096,
+            "94b4dee85da1891fcdd0cee4863d38809215965bdac7314c9c423e9f9c051695"
+          ]
+        }
+      }
+    },
+    "sigmoid": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.sigmoid_forward_kernel_rank_1": [
+            936,
+            "5b2ced11743322f864951d26a1ed5fbaaef81ee2f939af5e1eea1a1cc20a8881"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.sigmoid_forward_kernel_rank_1": [
+            936,
+            "360fd8630b24c61727bbef32c09136f6532a85c75d8a3d3bec0f7148bfd2782d"
+          ]
+        }
+      }
+    },
+    "silu": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.silu_forward_kernel_rank_1": [
+            1096,
+            "4816ff431b173c9837a0002b088cc9a022098936733da7bba589465e579289b1"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.silu_forward_kernel_rank_1": [
+            1096,
+            "669e1992df95773700ab41f9c7f3d4358ea40e14286e9438dbec04e031992331"
+          ]
+        }
+      }
+    },
+    "sin": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.sin_func_kernel_rank_1": [
+            6784,
+            "4083d4969663034174d994956b29a05d982579dc89a1af6e77e2e4c877fa6ced"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.sin_func_kernel_rank_1": [
+            6784,
+            "7c1e34049e7f6275b30687604b2950595301da240d4635cfa3385c490b2bc90d"
+          ]
+        }
+      }
+    },
+    "square": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.square_func_kernel_rank_1": [
+            440,
+            "82791d35f80681b76220d38e4cbd96aa0de77a37fe1cb08b6faf5a4dcaee6eb0"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.square_func_kernel_rank_1": [
+            440,
+            "542767f11fdd89e59a40e80db2a3a821323ed2fce438c1c07adc0c2ba9905f65"
+          ]
+        }
+      }
+    },
+    "tanh": {
+      "library": "FlagGems",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.tanh_kernel_kernel_rank_1": [
+            1928,
+            "8e405391f589096cb89a4c5f325b20866e65581758e017c3beed22d43a8bd6a8"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.tanh_kernel_kernel_rank_1": [
+            1928,
+            "21133542ca6b7029e631dd5b6b74b37abd8b8dcef03e6441c0e689af615e3c67"
+          ]
+        }
+      }
+    },
+    "silu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.silu_and_mul_kernel_kernel_rank_1": [
+            1200,
+            "b07ece1281f09a2ac989c442afa40b40bb9077f7263949a85607998ad3731fd5"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.silu_and_mul_kernel_kernel_rank_1": [
+            1200,
+            "e8f784821f3064a96bf5bd283b100546dc1cd5362ea4edc7c190ab3279e933be"
+          ]
+        }
+      }
+    },
+    "gelu_and_mul": {
+      "library": "FlagGems-vllm",
+      "shape": [
+        8192,
+        1536
+      ],
+      "layout": "contig",
+      "args": [
+        "in0_ptr",
+        "in1_ptr",
+        "out0_ptr",
+        "s0",
+        "num_tasks"
+      ],
+      "grid": [
+        24576,
+        1,
+        1
+      ],
+      "options": {
+        "num_warps": 4
+      },
+      "executable": {
+        "upstream": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.gelu_none_and_mul_kernel_kernel_rank_1": [
+            2048,
+            "6b990874b245d4b9c7a22f5e69a27db84876e7e608f2891be43ebf0b2859e20c"
+          ]
+        },
+        "hinted": {
+          ".text": [
+            128,
+            "bc37f1a8864a9bb4f8bf1bad0a5016b55e5559e3174143c9cd5193f82dc75f30"
+          ],
+          ".text.kernel.gelu_none_and_mul_kernel_kernel_rank_1": [
+            2048,
+            "dbc236f4457a61443846756430a6339e5b6309980d22dad212feed04d6609d25"
+          ]
+        }
+      }
+    }
+  }
+}

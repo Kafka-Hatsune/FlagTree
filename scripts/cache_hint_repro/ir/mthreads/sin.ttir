@@ -1,0 +1,28 @@
+module {
+  tt.func public @sin_func_kernel_rank_1(%in0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %out0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %s0: i32 {tt.divisibility = 16 : i32}, %num_tasks: i32 {tt.divisibility = 16 : i32}, %tiles_per_cta: i32) attributes {noinline = false} {
+    %cst = arith.constant dense<0> : tensor<1024xi64>
+    %offset0 = arith.constant 1024 : i64
+    %pid = tt.get_program_id x : i32
+    %pid_0 = arith.extsi %pid : i32 to i64
+    %offset0_1 = arith.muli %pid_0, %offset0 : i64
+    %offset0_2 = arith.trunci %offset0_1 : i64 to i32
+    %in0_bptr = arith.extsi %s0 : i32 to i64
+    %in0_bptr_3 = arith.extsi %offset0_2 : i32 to i64
+    %in0 = tt.splat %in0_ptr : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
+    %in0_4 = tt.splat %in0_bptr_3 : i64 -> tensor<1024xi64>
+    %in0_5 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32>
+    %in0_6 = arith.extsi %in0_5 : tensor<1024xi32> to tensor<1024xi64>
+    %in0_7 = arith.addi %in0_4, %in0_6 : tensor<1024xi64>
+    %in0_8 = tt.addptr %in0, %in0_7 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi64>
+    %in0_9 = arith.cmpi sge, %in0_7, %cst : tensor<1024xi64>
+    %in0_10 = tt.splat %in0_bptr : i64 -> tensor<1024xi64>
+    %in0_11 = arith.cmpi slt, %in0_7, %in0_10 : tensor<1024xi64>
+    %in0_12 = arith.andi %in0_9, %in0_11 : tensor<1024xi1>
+    %in0_13 = tt.load %in0_8, %in0_12 : tensor<1024x!tt.ptr<f32>>
+    %out0 = math.sin %in0_13 : tensor<1024xf32>
+    %0 = tt.splat %out0_ptr : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
+    %1 = tt.addptr %0, %in0_7 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi64>
+    tt.store %1, %out0, %in0_12 cacheModifier = musa_i3_o3_l1 : tensor<1024x!tt.ptr<f32>>
+    tt.return
+  }
+}

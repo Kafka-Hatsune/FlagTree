@@ -1,0 +1,33 @@
+module {
+  tt.func public @silu_forward_kernel_rank_1(%in0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %out0_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %s0: i32 {tt.divisibility = 16 : i32}, %num_tasks: i32 {tt.divisibility = 16 : i32}, %tiles_per_cta: i32) attributes {noinline = false} {
+    %cst = arith.constant dense<0> : tensor<1024xi64>
+    %y = arith.constant dense<0.000000e+00> : tensor<1024xf32>
+    %y_0 = arith.constant dense<1.000000e+00> : tensor<1024xf32>
+    %offset0 = arith.constant 1024 : i64
+    %pid = tt.get_program_id x : i32
+    %pid_1 = arith.extsi %pid : i32 to i64
+    %offset0_2 = arith.muli %pid_1, %offset0 : i64
+    %offset0_3 = arith.trunci %offset0_2 : i64 to i32
+    %in0_bptr = arith.extsi %s0 : i32 to i64
+    %in0_bptr_4 = arith.extsi %offset0_3 : i32 to i64
+    %in0 = tt.splat %in0_ptr : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
+    %in0_5 = tt.splat %in0_bptr_4 : i64 -> tensor<1024xi64>
+    %in0_6 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32>
+    %in0_7 = arith.extsi %in0_6 : tensor<1024xi32> to tensor<1024xi64>
+    %in0_8 = arith.addi %in0_5, %in0_7 : tensor<1024xi64>
+    %in0_9 = tt.addptr %in0, %in0_8 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi64>
+    %in0_10 = arith.cmpi sge, %in0_8, %cst : tensor<1024xi64>
+    %in0_11 = tt.splat %in0_bptr : i64 -> tensor<1024xi64>
+    %in0_12 = arith.cmpi slt, %in0_8, %in0_11 : tensor<1024xi64>
+    %in0_13 = arith.andi %in0_10, %in0_12 : tensor<1024xi1>
+    %in0_14 = tt.load %in0_9, %in0_13 : tensor<1024x!tt.ptr<f32>>
+    %y_15 = arith.subf %y, %in0_14 : tensor<1024xf32>
+    %y_16 = math.exp %y_15 : tensor<1024xf32>
+    %y_17 = arith.addf %y_16, %y_0 : tensor<1024xf32>
+    %y_18 = arith.divf %in0_14, %y_17 : tensor<1024xf32>
+    %0 = tt.splat %out0_ptr : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
+    %1 = tt.addptr %0, %in0_8 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi64>
+    tt.store %1, %y_18, %in0_13 cacheModifier = musa_i3_o3_l1 : tensor<1024x!tt.ptr<f32>>
+    tt.return
+  }
+}
