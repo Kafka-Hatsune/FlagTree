@@ -9,6 +9,9 @@ from triton._flagtree_backend import FLAGTREE_BACKEND
 from triton.experimental.tle.language import gpu
 
 BACKEND = FLAGTREE_BACKEND or "nvidia"
+SUPPORTED_BACKENDS = ("nvidia", "mthreads", "hcu", "metax", "ppu")
+if BACKEND not in SUPPORTED_BACKENDS:
+    pytest.skip(f"native cache policy IR tests do not support backend {BACKEND}", allow_module_level=True)
 DEVICE = "musa" if BACKEND == "mthreads" else "cuda"
 if BACKEND == "mthreads":
     import torch_musa  # noqa: F401
@@ -43,6 +46,22 @@ def test_string_and_object_share_memory_controls(read, write):
         for stage in ("ttir", "ttgir"):
             controls = re.findall(r"cacheModifier = (\w+)", kernel.asm[stage])
             assert controls == [read[1:], write[1:]]
+
+
+@pytest.mark.skipif(BACKEND != "metax", reason="MACA native cache metadata")
+def test_metax_streaming_policy_reaches_installed_llvm_lowering():
+    x = torch.arange(256, device=DEVICE, dtype=torch.float32)
+    y = torch.full_like(x, -17)
+    policy = gpu.metax.CachePolicy("cs")
+    baseline = _memory[(1, )](x, y, None, None)
+    y.fill_(-17)
+    kernel = _memory[(1, )](x, y, policy, policy)
+    for instruction in ("load", "store"):
+        accesses = [line for line in kernel.asm["llir"].splitlines() if re.search(rf"\b{instruction}\s", line)]
+        assert any("!metaxgpu.l2rp" in line and "!nontemporal" in line for line in accesses)
+    assert "!metaxgpu.l2rp" not in baseline.asm["llir"]
+    torch.testing.assert_close(y[:253], x[:253] + 1, rtol=0, atol=0)
+    assert torch.all(y[253:] == -17)
 
 
 @pytest.mark.skipif(BACKEND != "hcu", reason="gfx936 write-through buffer store")
